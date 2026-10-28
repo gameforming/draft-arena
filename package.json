@@ -1,0 +1,10 @@
+{
+  "name": "draft-arena",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Draft Arena multiplayer Magic draft MVP",
+  "scripts": {
+    "build": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
+    "start": "npm start --prefix server"
+  }
+}
