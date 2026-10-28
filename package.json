@@ -4,7 +4,7 @@
   "private": true,
   "description": "Draft Arena multiplayer Magic draft MVP",
   "scripts": {
-    "build": "npm install --prefix server && npm install --prefix client && npm run build --prefix client",
+    "build": "npm install --no-audit --no-fund --prefix server && npm install --include=dev --no-audit --no-fund --prefix client && npm run build --prefix client",
     "start": "npm start --prefix server"
   }
 }
