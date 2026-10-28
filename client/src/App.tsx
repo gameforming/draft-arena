@@ -1,3 +1,405 @@
+import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { io, type Socket } from "socket.io-client";
+import {
+  ArrowLeft,
+  ArrowLeftRight,
+  BookOpen,
+  CheckCircle2,
+  ChevronRight,
+  Flag,
+  Hand,
+  Heart,
+  Layers,
+  LoaderCircle,
+  MessageCircle,
+  Minus,
+  Mountain,
+  Play,
+  Plus,
+  RotateCcw,
+  Search,
+  Send,
+  Shield,
+  Sparkles,
+  Swords,
+  Users,
+  Vote,
+  X,
+} from "lucide-react";
+
+const SERVER = typeof window !== "undefined" ? window.location.origin : "";
+
+const BASIC_LANDS = ["Plains", "Island", "Swamp", "Mountain", "Forest"] as const;
+type BasicLand = (typeof BASIC_LANDS)[number];
+type BasicLands = Record<BasicLand, number>;
+const EMPTY_LANDS: BasicLands = {
+  Plains: 0,
+  Island: 0,
+  Swamp: 0,
+  Mountain: 0,
+  Forest: 0,
+};
+
+const COLORS = ["W", "U", "B", "R", "G", "C"] as const;
+type ManaColor = (typeof COLORS)[number];
+type ManaPool = Record<ManaColor, number>;
+const EMPTY_MANA: ManaPool = { W: 0, U: 0, B: 0, R: 0, G: 0, C: 0 };
+const MANA_LABEL: Record<ManaColor, string> = {
+  W: "Wit",
+  U: "Blauw",
+  B: "Zwart",
+  R: "Rood",
+  G: "Groen",
+  C: "Kleurloos",
+};
+
+interface SetInfo {
+  code: string;
+  name: string;
+  released_at?: string | null;
+  set_type?: string | null;
+  card_count?: number;
+  printed_size?: number;
+}
+
+const FALLBACK_SETS: SetInfo[] = [
+  { code: "ltr", name: "The Lord of the Rings: Tales of Middle-earth" },
+  { code: "woe", name: "Wilds of Eldraine" },
+  { code: "mkm", name: "Murders at Karlov Manor" },
+  { code: "mh3", name: "Modern Horizons 3" },
+  { code: "dsk", name: "Duskmourn: House of Horror" },
+  { code: "fdn", name: "Foundations" },
+];
+
+interface CardFace {
+  name?: string;
+  image?: string | null;
+  small?: string | null;
+  mana_cost?: string;
+  type_line?: string;
+  oracle_text?: string;
+  power?: string | number | null;
+  toughness?: string | number | null;
+  loyalty?: string | number | null;
+  colors?: string[];
+}
+
+interface Card {
+  id: string;
+  instanceId: string;
+  name: string;
+  image: string | null;
+  small?: string | null;
+  mana_cost: string;
+  type_line: string;
+  oracle_text: string;
+  rarity?: string;
+  layout?: string;
+  faces?: CardFace[];
+  power?: string | number | null;
+  toughness?: string | number | null;
+  loyalty?: string | number | null;
+  cmc?: number;
+  colors?: string[];
+  color_identity?: string[];
+  keywords?: string[];
+  set?: string;
+  basicLandName?: BasicLand | null;
+  permanentId?: string;
+  tapped?: boolean;
+  summoningSick?: boolean;
+  damageMarked?: number;
+  toughnessMod?: number;
+  faceIndex?: number;
+  controllerId?: string;
+}
+
+interface Player {
+  id: string;
+  name: string;
+  ready?: boolean;
+  isHost?: boolean;
+  connected?: boolean;
+  hasPicked?: boolean;
+  picksCount?: number;
+  deckReady?: boolean;
+  life?: number;
+  handCount?: number;
+  libraryCount?: number;
+  battlefield?: Card[];
+  graveyard?: Card[];
+  exile?: Card[];
+  manaPool?: ManaPool;
+  landPlayed?: boolean;
+  mulliganStatus?: string;
+  eliminated?: boolean;
+}
+
+interface GameMessage {
+  id: string;
+  name: string;
+  text: string;
+  at: number;
+  system?: boolean;
+}
+
+interface VoteTotals {
+  sets: Record<string, number>;
+  boosters: Record<string, number>;
+}
+
+interface Attack {
+  attackerId: string;
+  attackerControllerId: string;
+  defenderId: string;
+}
+
+interface MatchState {
+  phase: string;
+  combatStep: string | null;
+  turnNumber: number;
+  activePlayerId: string | null;
+  startingPlayerId?: string | null;
+  attacks: Attack[];
+  blockers?: unknown[];
+  blockingPlayerIds: string[];
+  winnerId?: string | null;
+  winnerName?: string | null;
+}
+
+interface Game {
+  id: string;
+  title: string;
+  status: string;
+  setCode: string;
+  setName: string;
+  boosterCount: number;
+  hostName: string;
+  players: Player[];
+  maxPlayers: number;
+  createdAt?: number;
+  votes: VoteTotals;
+  messages: GameMessage[];
+  draftRound: number;
+  draftPick: number;
+  picksDone: number;
+  direction?: string | null;
+  pickProgress?: number;
+  match: MatchState | null;
+}
+
+interface DraftPrivate {
+  gameId: string;
+  status: string;
+  booster: Card[];
+  picks: Card[];
+  basicLands?: BasicLands;
+  deckReady: boolean;
+  deckSelection?: string[];
+  hasPicked: boolean;
+  round: number;
+  boosterCount: number;
+  pick: number;
+  direction: string | null;
+}
+
+interface MatchPrivate {
+  gameId: string;
+  status: string;
+  hand: Card[];
+  picks: Card[];
+  libraryCount: number;
+  manaPool: ManaPool;
+  landPlayed: boolean;
+  basicLands?: BasicLands;
+  mulligansTaken: number;
+  bottomNeeded: number;
+  mulliganStatus: string;
+  deckReady: boolean;
+  deckSelection: string[];
+  deckCount: number;
+}
+
+function faceAt(card: Card, faceIndex = 0): CardFace {
+  const face = card.faces?.[faceIndex];
+  if (!face) return card;
+  return {
+    ...card,
+    ...face,
+    name: face.name || card.name,
+    image: face.image || card.image,
+    small: face.small || card.small,
+    mana_cost: face.mana_cost ?? card.mana_cost,
+    type_line: face.type_line ?? card.type_line,
+    oracle_text: face.oracle_text ?? card.oracle_text,
+    power: face.power ?? card.power,
+    toughness: face.toughness ?? card.toughness,
+    loyalty: face.loyalty ?? card.loyalty,
+  };
+}
+
+function imgProxy(url?: string | null): string {
+  if (!url) return "";
+  if (!/^https:\/\/(cards\.scryfall\.io|c1\.scryfall\.com|c2\.scryfall\.com|c3\.scryfall\.com)\//i.test(url)) {
+    return url;
+  }
+  return `${SERVER}/api/image?url=${encodeURIComponent(url)}`;
+}
+
+function cardIsLand(card: Pick<Card, "type_line">): boolean {
+  return /\bland\b/i.test(card.type_line || "");
+}
+
+function cardIsCreature(card: Pick<Card, "type_line">): boolean {
+  return /\bcreature\b/i.test(card.type_line || "");
+}
+
+function cardHasKeyword(card: Pick<Card, "keywords" | "oracle_text">, keyword: string): boolean {
+  return (card.keywords || []).some((item) => item.toLowerCase() === keyword.toLowerCase()) ||
+    new RegExp(`\\b${keyword}\\b`, "i").test(card.oracle_text || "");
+}
+
+function cardIsInstantOrFlash(card: Pick<Card, "type_line" | "keywords" | "oracle_text">): boolean {
+  return /\binstant\b/i.test(card.type_line || "") || cardHasKeyword(card, "flash");
+}
+
+function powerToughness(card: { power?: string | number | null; toughness?: string | number | null }): string {
+  const power = card.power ?? "—";
+  const toughness = card.toughness ?? "—";
+  return `${power}/${toughness}`;
+}
+
+function countVotes(votes: VoteTotals, key: "sets" | "boosters"): number {
+  return Object.values(votes?.[key] || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+}
+
+const EXTRA_CSS = `
+.card-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(125px,1fr));gap:12px;align-items:start}
+.card-tile{min-width:0;border:1px solid #30394a;background:#151b26;border-radius:10px;padding:7px;overflow:hidden}
+.card-tile.is-selected{border-color:#8878e9;box-shadow:0 0 0 2px #8878e933;background:#211f35}
+.card-tile .card-image{width:100%;}
+.card-tile .image-wrap{aspect-ratio:5/7;}
+.card-tile-meta{display:flex;flex-direction:column;gap:4px;min-width:0;padding:7px 2px 2px}
+.card-tile-meta strong{font-size:11px;line-height:1.35;overflow-wrap:anywhere}
+.card-tile-meta small{font-size:9px;line-height:1.4;color:#909bb0;overflow-wrap:anywhere}
+.card-tile-actions{display:flex;gap:5px;margin-top:6px}
+.card-tile-actions button{flex:1;min-width:0;border:1px solid #393f53;background:#242b3a;color:#d5dced;border-radius:7px;padding:7px 5px;font-size:10px}
+.card-tile-actions button.selected{border-color:#8b7bef;background:#3b326b;color:#f1edff}
+.card-grid .pick-button{margin-top:6px}
+.land-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(190px,1fr));gap:9px;margin:10px 0 18px}
+.land-item{display:flex;align-items:center;gap:10px;min-width:0;border:1px solid #30394a;background:#151b26;border-radius:10px;padding:10px}
+.land-symbol{width:32px;height:32px;flex-shrink:0;display:grid;place-items:center;border-radius:8px;background:#2a3040;color:#c6cfea}
+.land-desc{flex:1;min-width:0;display:flex;flex-direction:column;gap:4px}
+.land-desc strong{font-size:11px}
+.land-desc small{font-size:9px;color:#8995aa}
+.land-count{display:flex;align-items:center;gap:8px}
+.land-count button{width:27px;height:27px;display:grid;place-items:center;border-radius:7px;border:1px solid #3b4356;background:#242b3a;color:#e2e7f2}
+.land-count strong{min-width:20px;text-align:center;font-size:12px;font-variant-numeric:tabular-nums}
+.card-art-placeholder{display:flex;align-items:center;justify-content:center;min-height:140px;text-align:center;padding:12px;border:1px dashed #3a4356;border-radius:9px;color:#aeb8cd;font-size:11px}
+@media(max-width:520px){.card-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}.card-tile{padding:5px}.land-grid{grid-template-columns:1fr}}
+`;
+
+interface CardTileProps {
+  card: Card;
+  selected?: boolean;
+  disabled?: boolean;
+  onPreview?: (card: Card) => void;
+  onPick?: (card: Card) => void;
+  onToggle?: (card: Card) => void;
+  onPlay?: (card: Card, faceIndex: number) => void;
+}
+
+function CardTile({ card, selected = false, disabled = false, onPreview, onPick, onToggle, onPlay }: CardTileProps) {
+  const face = faceAt(card, card.faceIndex || 0);
+  const image = imgProxy(face.image || card.image);
+
+  return (
+    <article className={`card-tile ${selected ? "is-selected" : ""}`}>
+      <button
+        className="card-image"
+        type="button"
+        onClick={() => onPreview?.(card)}
+        aria-label={`Bekijk ${face.name || card.name}`}
+      >
+        <div className="image-wrap">
+          {image ? (
+            <img
+              src={image}
+              alt={face.name || card.name}
+              loading="lazy"
+              onError={(event) => { event.currentTarget.style.display = "none"; }}
+            />
+          ) : (
+            <div className="card-placeholder">
+              <Layers size={20} />
+              <strong>{face.name || card.name}</strong>
+              <small>{face.type_line || card.type_line}</small>
+            </div>
+          )}
+        </div>
+      </button>
+      <div className="card-tile-meta">
+        <strong>{face.name || card.name}</strong>
+        <small>{face.mana_cost || "Geen mana cost"}</small>
+        <small>{face.type_line || card.type_line}</small>
+      </div>
+      {onPick && (
+        <button className="pick-button" type="button" disabled={disabled} onClick={() => onPick(card)}>
+          Kies kaart
+        </button>
+      )}
+      {(onToggle || onPlay) && (
+        <div className="card-tile-actions">
+          {onToggle && (
+            <button className={selected ? "selected" : ""} type="button" disabled={disabled} onClick={() => onToggle(card)}>
+              {selected ? "In deck" : "Toevoegen"}
+            </button>
+          )}
+          {onPlay && (
+            <button type="button" disabled={disabled} onClick={() => onPlay(card, card.faceIndex || 0)}>
+              Speel
+            </button>
+          )}
+        </div>
+      )}
+    </article>
+  );
+}
+
+interface CardModalProps {
+  card: Card | null;
+  onClose: () => void;
+}
+
+function CardModal({ card, onClose }: CardModalProps) {
+  if (!card) return null;
+  const face = faceAt(card, card.faceIndex || 0);
+  const image = imgProxy(face.image || card.image);
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}>
+      <section className="card-modal" role="dialog" aria-modal="true" aria-label={`Kaart: ${face.name || card.name}`}>
+        <button className="icon-button close" type="button" onClick={onClose} aria-label="Sluiten">
+          <X size={16} />
+        </button>
+        {image ? (
+          <img src={image} alt={face.name || card.name} onError={(event) => { event.currentTarget.style.display = "none"; }} />
+        ) : (
+          <div className="large-placeholder card-art-placeholder">{face.name || card.name}</div>
+        )}
+        <div className="modal-info">
+          <h2>{face.name || card.name}</h2>
+          <p><strong>{face.mana_cost || "Geen mana cost"}</strong></p>
+          <p>{face.type_line || card.type_line}</p>
+          {face.oracle_text && <p>{face.oracle_text}</p>}
+          {(face.power != null || face.toughness != null) && <p><strong>{powerToughness(face as Card)}</strong></p>}
+          <small>{card.set ? `Set: ${card.set.toUpperCase()} · ` : ""}{card.rarity || ""}</small>
+        </div>
+      </section>
+    </div>
+  );
+}
+
 function manaLabel(pool: ManaPool) {
   return COLORS.map(
     (color) => `${color}: ${pool[color] || 0}`
@@ -447,26 +849,22 @@ function App() {
   };
 
   const updateLand = (name: BasicLand, delta: number) => {
-    if (draftPrivate?.deckReady) return;
+    if (!socket || !activeGameId || draftPrivate?.deckReady) return;
 
-    setBasicLands((current) => {
-      const next = {
-        ...current,
-        [name]: Math.max(0, Math.min(60, current[name] + delta)),
-      };
+    const next: BasicLands = {
+      ...basicLands,
+      [name]: Math.max(0, Math.min(60, (basicLands[name] || 0) + delta)),
+    };
 
-      const total = BASIC_LANDS.reduce(
-        (sum, land) => sum + next[land],
-        0
-      );
+    const total = BASIC_LANDS.reduce((sum, land) => sum + next[land], 0);
+    if (total > 100) {
+      setNoticeMessage("Je kunt maximaal 100 basic lands toevoegen.");
+      return;
+    }
 
-      if (total > 100) {
-        setNoticeMessage("Je kunt maximaal 100 basic lands toevoegen.");
-        return current;
-      }
-
-      return next;
-    });
+    // Update the GUI immediately and persist the count to the server on every click.
+    setBasicLands(next);
+    socket.emit("set-basic-lands", { gameId: activeGameId, lands: next });
   };
 
   const submitDeck = () => {
@@ -1606,7 +2004,14 @@ function App() {
                                 (card) => card.instanceId
                               ) || []
                             );
-                            setBasicLands({ ...EMPTY_LANDS });
+                            const empty = { ...EMPTY_LANDS };
+                            setBasicLands(empty);
+                            if (socket && activeGameId) {
+                              socket.emit("set-basic-lands", {
+                                gameId: activeGameId,
+                                lands: empty,
+                              });
+                            }
                           }}
                         >
                           Reset selectie
