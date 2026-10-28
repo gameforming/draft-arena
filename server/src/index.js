@@ -206,17 +206,73 @@ async function loadCardPool(setCode) {
   cardPoolCache.set(setCode, { cards: unique, at: Date.now() });
   return unique;
 }
+function fallbackBasicLand(name) {
+  const manaByName = {
+    Plains: "W",
+    Island: "U",
+    Swamp: "B",
+    Mountain: "R",
+    Forest: "G",
+  };
+  const mana = manaByName[name];
+  if (!mana) throw new Error(`Onbekend basic land: ${name}`);
+
+  // The gameplay engine only needs the card's identity, type, and mana text.
+  // A null image is valid: the GUI displays a readable placeholder instead.
+  return {
+    id: `draft-arena-basic-${name.toLowerCase()}`,
+    name,
+    image: null,
+    small: null,
+    mana_cost: "",
+    type_line: `Basic Land — ${name}`,
+    oracle_text: `{T}: Add {${mana}}.`,
+    rarity: "common",
+    layout: "normal",
+    faces: [],
+    power: null,
+    toughness: null,
+    loyalty: null,
+    cmc: 0,
+    colors: [],
+    color_identity: [mana],
+    keywords: [],
+    set: "basic",
+    basicLandName: name,
+  };
+}
+
 async function loadBasicLand(name) {
+  if (!BASIC_LANDS.includes(name)) throw new Error(`Onbekend basic land: ${name}`);
   if (basicLandCache.has(name)) return basicLandCache.get(name);
+
   const result = (async () => {
-    const raw = await searchScryfall(`t:basic name:${name} game:paper`, 10);
-    const card = raw.map(normalizeCard).find((c) => c.image && new RegExp(`\\b${name}\\b`, "i").test(c.type_line));
-    if (!card) throw new Error(`Basic land ${name} niet gevonden.`);
-    card.basicLandName = name;
-    return card;
+    try {
+      const raw = await searchScryfall(`t:basic name:${name} game:paper`, 10);
+      const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+      const card = raw
+        .map(normalizeCard)
+        .find((candidate) => candidate.image && new RegExp(`\\b${escapedName}\\b`, "i").test(candidate.type_line || ""));
+      if (card) {
+        card.basicLandName = name;
+        return card;
+      }
+      console.warn(`Scryfall gaf geen afbeelding voor ${name}; lokale basic-land fallback wordt gebruikt.`);
+    } catch (error) {
+      console.warn(`Basic land ${name} kon niet via Scryfall worden geladen; lokale fallback wordt gebruikt: ${error.message}`);
+    }
+
+    return fallbackBasicLand(name);
   })();
+
+  // Cache the promise so concurrent players do not trigger five duplicate searches.
   basicLandCache.set(name, result);
-  try { return await result; } catch (e) { basicLandCache.delete(name); throw e; }
+  try {
+    return await result;
+  } catch (error) {
+    basicLandCache.delete(name);
+    throw error;
+  }
 }
 
 function buildBooster(pool) {
