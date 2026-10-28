@@ -1,0 +1,125 @@
+.card-grid strong,
+.card-grid small,
+.card-grid p,
+.card-grid span {
+  overflow-wrap: anywhere;
+}
+
+/* Tablet */
+@media (max-width: 1050px) {
+  .game-layout {
+    grid-template-columns: minmax(0, 1fr) 280px;
+    gap: 12px;
+  }
+
+  .card-grid,
+  .picks-strip {
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+    gap: 9px;
+  }
+
+  .game-stats {
+    gap: 8px;
+  }
+
+  .stat-card {
+    padding: 10px;
+  }
+}
+
+/* Mobiel */
+@media (max-width: 760px) {
+  .game-layout {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 14px;
+    padding: 18px 12px 24px;
+  }
+
+  .game-main,
+  .chat-panel {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .chat-panel {
+    position: relative;
+    top: auto;
+    max-height: 440px;
+    min-height: 320px;
+  }
+
+  .play-section {
+    padding: 14px;
+  }
+
+  .card-grid,
+  .picks-strip {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .game-stats {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 6px;
+  }
+
+  .stat-card {
+    padding: 8px;
+  }
+
+  .stat-card span {
+    font-size: 9px;
+  }
+
+  .stat-card strong {
+    font-size: 17px;
+  }
+
+  .section-bar {
+    gap: 8px;
+  }
+
+  .land-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .board-actions {
+    align-items: stretch;
+  }
+
+  .board-actions > button {
+    flex: 1 1 100%;
+    width: 100%;
+  }
+}
+
+/* Smalle telefoons */
+@media (max-width: 390px) {
+  .card-grid,
+  .picks-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 8px;
+  }
+
+  .game-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .section-bar h3 {
+    font-size: 14px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    transition-duration: 0.01ms !important;
+  }
+}
