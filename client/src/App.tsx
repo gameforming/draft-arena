@@ -1,579 +1,12 @@
-import {
-  type FormEvent,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { io, type Socket } from "socket.io-client";
-import {
-  Swords,
-  Users,
-  MessageCircle,
-  Layers,
-  Vote,
-  Play,
-  Plus,
-  Eye,
-  Send,
-  X,
-  Sparkles,
-  ArrowLeft,
-  Image as ImageIcon,
-  Search,
-  LoaderCircle,
-  RotateCcw,
-  CheckCircle2,
-  ArrowLeftRight,
-  Minus,
-  Mountain,
-  BookOpen,
-} from "lucide-react";
-
-const SERVER = (
-  (import.meta as any).env.VITE_SERVER_URL ||
-  window.location.origin
-).replace(/\/+$/, "");
-
-const BASIC_LANDS = [
-  "Plains",
-  "Island",
-  "Swamp",
-  "Mountain",
-  "Forest",
-] as const;
-
-type BasicLand = (typeof BASIC_LANDS)[number];
-
-type BasicLands = Record<BasicLand, number>;
-
-type CardFace = {
-  name: string;
-  image: string | null;
-  small: string | null;
-  mana_cost: string;
-  type_line: string;
-  oracle_text: string;
-};
-
-type Card = {
-  id: string;
-  instanceId?: string;
-  name: string;
-  image: string | null;
-  small: string | null;
-  mana_cost: string;
-  type_line: string;
-  oracle_text: string;
-  rarity?: string;
-  layout?: string;
-  faces?: CardFace[];
-};
-
-type Player = {
-  id: string;
-  name: string;
-  ready: boolean;
-  isHost: boolean;
-  connected?: boolean;
-  hasPicked?: boolean;
-  picksCount?: number;
-};
-
-type Msg = {
-  id: string;
-  name: string;
-  text: string;
-  at: number;
-  system: boolean;
-};
-
-type SetInfo = {
-  code: string;
-  name: string;
-  released_at?: string | null;
-  set_type?: string | null;
-};
-
-type VoteTotals = {
-  sets?: Record<string, number>;
-  boosters?: Record<string, number>;
-};
-
-type Game = {
-  id: string;
-  title: string;
-  status: string;
-  setCode: string;
-  setName: string;
-  boosterCount: number;
-  hostName: string;
-  players: Player[];
-  maxPlayers: number;
-  createdAt: number;
-  votes: VoteTotals;
-  messages: Msg[];
-  draftRound: number;
-  draftPick: number;
-  picksDone: number;
-  direction?: "left" | "right" | null;
-  pickProgress?: number;
-};
-
-type PrivateDraftState = {
-  gameId: string;
-  status: string;
-  booster: Card[];
-  picks: Card[];
-  basicLands: BasicLands;
-  hasPicked: boolean;
-  round: number;
-  boosterCount: number;
-  pick: number;
-  direction: "left" | "right" | null;
-  remaining: number;
-};
-
-const EMPTY_LANDS: BasicLands = {
-  Plains: 0,
-  Island: 0,
-  Swamp: 0,
-  Mountain: 0,
-  Forest: 0,
-};
-
-const FALLBACK_SETS: SetInfo[] = [
-  {
-    code: "ltr",
-    name: "The Lord of the Rings: Tales of Middle-earth",
-  },
-  {
-    code: "ltc",
-    name: "The Lord of the Rings: Tales of Middle-earth Commander",
-  },
-  { code: "woe", name: "Wilds of Eldraine" },
-  { code: "mkm", name: "Murders at Karlov Manor" },
-  { code: "mh3", name: "Modern Horizons 3" },
-  { code: "dsk", name: "Duskmourn: House of Horror" },
-  { code: "fdn", name: "Foundations" },
-];
-
-const PLAY_CSS = `
-  .spin { animation: draft-spin 1s linear infinite; }
-  @keyframes draft-spin { to { transform: rotate(360deg); } }
-
-  .play-summary {
-    display:flex; align-items:center; justify-content:space-between;
-    flex-wrap:wrap; gap:12px; margin:14px 0 18px;
-  }
-  .play-summary-item {
-    display:flex; flex-direction:column; gap:4px;
-    padding:12px 16px; border-radius:12px;
-    border:1px solid var(--border,#343746);
-    background:rgba(139,92,246,.08); min-width:105px;
-  }
-  .play-summary-item strong { font-size:1.2rem; }
-  .play-summary-item span { opacity:.72; font-size:.8rem; }
-  .pick-progress-track {
-    height:7px; border-radius:20px; overflow:hidden;
-    background:rgba(128,128,128,.2); margin:10px 0;
-  }
-  .pick-progress-fill {
-    height:100%; background:#a78bfa; border-radius:20px;
-    transition:width .2s ease;
-  }
-  .draft-status-box {
-    display:flex; align-items:flex-start; gap:12px;
-    padding:14px 16px; margin:14px 0;
-    border:1px solid var(--border,#343746); border-radius:12px;
-    background:rgba(139,92,246,.08);
-  }
-  .draft-status-box p { margin:4px 0 0; opacity:.75; font-size:.9rem; }
-  .play-card-grid {
-    display:grid;
-    grid-template-columns:repeat(auto-fill,minmax(145px,1fr));
-    gap:15px; margin:20px 0;
-  }
-  .play-card {
-    min-width:0; padding:9px;
-    border-radius:13px; border:1px solid var(--border,#343746);
-    background:rgba(255,255,255,.025);
-    display:flex; flex-direction:column; gap:8px;
-  }
-  .play-card:has(.choose-card:not(:disabled):hover) {
-    border-color:rgba(167,139,250,.65);
-  }
-  .play-card-photo {
-    display:block; width:100%; padding:0; border:0;
-    overflow:hidden; border-radius:9px;
-    background:rgba(128,128,128,.12); cursor:zoom-in;
-    aspect-ratio:5/7;
-  }
-  .play-card-photo img {
-    display:block; width:100%; height:100%;
-    object-fit:contain; border-radius:9px;
-  }
-  .play-card-placeholder {
-    height:100%; display:flex; flex-direction:column;
-    align-items:center; justify-content:center;
-    gap:8px; padding:8px; text-align:center; opacity:.75;
-  }
-  .play-card-controls {
-    display:flex; flex-wrap:wrap; gap:5px; align-items:center;
-  }
-  .play-card-name {
-    display:block; width:100%; font-size:.84rem;
-    font-weight:650; overflow-wrap:anywhere;
-  }
-  .flip-card-btn,.card-details-btn {
-    flex:1; min-width:0; padding:6px 7px;
-    border:1px solid var(--border,#343746); border-radius:7px;
-    background:transparent; color:inherit; cursor:pointer;
-    font-size:.75rem;
-  }
-  .flip-card-btn:hover,.card-details-btn:hover {
-    border-color:#a78bfa;
-  }
-  .choose-card {
-    width:100%; padding:9px 6px; border:0;
-    border-radius:8px; background:#8b5cf6;
-    color:white; font-weight:700; cursor:pointer;
-  }
-  .choose-card:disabled {
-    cursor:not-allowed; background:rgba(128,128,128,.25);
-    color:inherit; opacity:.7;
-  }
-  .draft-lock-note {
-    display:flex; align-items:center; gap:8px;
-    font-size:.9rem; opacity:.8; margin:12px 0;
-  }
-  .drafted-pool {
-    display:grid;
-    grid-template-columns:repeat(auto-fill,minmax(115px,1fr));
-    gap:12px; margin:18px 0;
-  }
-  .drafted-pool .play-card { padding:6px; }
-  .drafted-pool .play-card-name { font-size:.75rem; }
-  .basic-land-grid {
-    display:grid;
-    grid-template-columns:repeat(auto-fit,minmax(155px,1fr));
-    gap:10px; margin:18px 0;
-  }
-  .basic-land-card {
-    display:flex; align-items:center; gap:10px;
-    padding:12px; border:1px solid var(--border,#343746);
-    border-radius:12px; background:rgba(255,255,255,.025);
-  }
-  .land-symbol {
-    width:40px; height:40px; flex-shrink:0;
-    display:flex; align-items:center; justify-content:center;
-    border-radius:50%; background:rgba(139,92,246,.14);
-  }
-  .land-details { min-width:0; flex:1; }
-  .land-details strong { display:block; }
-  .land-details small { opacity:.65; }
-  .land-qty {
-    display:flex; align-items:center; gap:7px;
-    font-variant-numeric:tabular-nums;
-  }
-  .land-qty button {
-    width:27px; height:27px; display:flex;
-    justify-content:center; align-items:center;
-    border:1px solid var(--border,#343746);
-    border-radius:7px; background:transparent;
-    color:inherit; cursor:pointer;
-  }
-  .land-qty button:disabled { opacity:.3; cursor:not-allowed; }
-  .deck-count-bar {
-    display:flex; flex-wrap:wrap; justify-content:space-between;
-    align-items:center; gap:12px; padding:14px;
-    border:1px solid var(--border,#343746); border-radius:12px;
-    background:rgba(139,92,246,.08);
-  }
-  .deck-count-bar strong { font-size:1.2rem; }
-  .set-search-input {
-    width:100%; box-sizing:border-box; padding:11px 12px;
-    border:1px solid var(--border,#343746); border-radius:9px;
-    background:transparent; color:inherit;
-  }
-  .set-option {
-    display:flex; width:100%; align-items:center; gap:10px;
-    padding:10px; text-align:left; border:1px solid transparent;
-    border-radius:8px; background:transparent; color:inherit;
-    cursor:pointer;
-  }
-  .set-option:hover { background:rgba(139,92,246,.08); }
-  .set-option.selected {
-    border-color:#a78bfa; background:rgba(139,92,246,.14);
-  }
-  .set-option-code {
-    min-width:42px; text-align:center; padding:4px;
-    border-radius:6px; background:rgba(128,128,128,.12);
-    font-size:.74rem; font-weight:800;
-  }
-  .set-option-name { flex:1; min-width:0; }
-  .set-option-name small { display:block; opacity:.65; margin-top:3px; }
-  .set-option-check { color:#a78bfa; font-weight:800; }
-  .card-modal-img {
-    display:block; width:100%; max-width:330px;
-    max-height:70vh; object-fit:contain;
-    margin:0 auto; border-radius:12px;
-  }
-  .modal-flip-row {
-    display:flex; justify-content:center; gap:9px;
-    flex-wrap:wrap; margin:12px 0;
-  }
-  .modal-flip-row button {
-    display:flex; align-items:center; gap:6px;
-    padding:8px 12px; border:1px solid var(--border,#343746);
-    border-radius:8px; color:inherit;
-    background:transparent; cursor:pointer;
-  }
-  .pool-heading {
-    display:flex; justify-content:space-between; align-items:center;
-    flex-wrap:wrap; gap:8px; margin-top:24px;
-  }
-  .pool-heading p { margin:4px 0 0; opacity:.7; font-size:.9rem; }
-  .play-action-row {
-    display:flex; flex-wrap:wrap; gap:10px; margin-top:16px;
-  }
-  @media(max-width:600px) {
-    .play-card-grid { grid-template-columns:repeat(2,minmax(0,1fr)); gap:9px; }
-    .drafted-pool { grid-template-columns:repeat(2,minmax(0,1fr)); }
-    .basic-land-grid { grid-template-columns:1fr; }
-    .play-card { padding:6px; }
-    .play-card-name { font-size:.78rem; }
-  }
-`;
-
-function countVotes(
-  votes: VoteTotals | undefined,
-  category: "sets" | "boosters"
-): number {
-  return Object.values(votes?.[category] ?? {}).reduce<number>(
-    (total, value) => total + Number(value || 0),
-    0
-  );
+function manaLabel(pool: ManaPool) {
+  return COLORS.map(
+    (color) => `${color}: ${pool[color] || 0}`
+  ).join(" · ");
 }
-
-function imageProxy(url: string | null | undefined): string {
-  if (!url) return "";
-
-  try {
-    const parsed = new URL(url);
-
-    if (parsed.protocol !== "https:") return "";
-
-    return `${SERVER}/api/image?url=${encodeURIComponent(
-      parsed.toString()
-    )}`;
-  } catch {
-    return "";
-  }
-}
-
-function faceFor(card: Card, faceIndex: number): CardFace {
-  return (
-    card.faces?.[faceIndex] || {
-      name: card.name,
-      image: card.image,
-      small: card.small,
-      mana_cost: card.mana_cost,
-      type_line: card.type_line,
-      oracle_text: card.oracle_text,
-    }
-  );
-}
-
-// --------------------------------------------------
-// Kaarttegel: toont de kaart, laat flippen en kiezen toe.
-// --------------------------------------------------
-
-function CardTile({
-  card,
-  onPick,
-  disabled = false,
-  onPreview,
-  compact = false,
-}: {
-  card: Card;
-  onPick?: () => void;
-  disabled?: boolean;
-  onPreview: (card: Card) => void;
-  compact?: boolean;
-}) {
-  const [faceIndex, setFaceIndex] = useState(0);
-
-  useEffect(() => {
-    setFaceIndex(0);
-  }, [card.instanceId, card.id]);
-
-  const face = faceFor(card, faceIndex);
-  const image = imageProxy(face.image || card.image);
-  const doubleFaced = (card.faces?.length ?? 0) > 1;
-
-  const flip = () => {
-    const total = card.faces?.length ?? 0;
-    if (total > 1) {
-      setFaceIndex((current) => (current + 1) % total);
-    }
-  };
-
-  return (
-    <article
-      className={`play-card ${compact ? "play-card-compact" : ""}`}
-    >
-      <button
-        className="play-card-photo"
-        type="button"
-        onClick={() => onPreview(card)}
-        title={`Bekijk ${face.name}`}
-      >
-        {image ? (
-          <img src={image} alt={face.name} loading="lazy" />
-        ) : (
-          <div className="play-card-placeholder">
-            <ImageIcon size={25} />
-            <span>{face.name}</span>
-          </div>
-        )}
-      </button>
-
-      <div className="play-card-controls">
-        <span className="play-card-name" title={face.name}>
-          {face.name}
-        </span>
-
-        {doubleFaced && (
-          <button
-            className="flip-card-btn"
-            type="button"
-            onClick={flip}
-            title="Draai naar de andere kaartzijde"
-          >
-            <RotateCcw size={12} /> Flip
-          </button>
-        )}
-
-        <button
-          className="card-details-btn"
-          type="button"
-          onClick={() => onPreview(card)}
-        >
-          Bekijk
-        </button>
-      </div>
-
-      {onPick && (
-        <button
-          className="choose-card"
-          type="button"
-          disabled={disabled}
-          onClick={onPick}
-        >
-          {disabled ? "Pick gedaan" : "Kies kaart"}
-        </button>
-      )}
-    </article>
-  );
-}
-
-// --------------------------------------------------
-// Modal met kaartdetails en flipfunctie.
-// --------------------------------------------------
-
-function CardModal({
-  card,
-  onClose,
-}: {
-  card: Card | null;
-  onClose: () => void;
-}) {
-  const [faceIndex, setFaceIndex] = useState(0);
-
-  useEffect(() => {
-    setFaceIndex(0);
-  }, [card?.instanceId, card?.id]);
-
-  if (!card) return null;
-
-  const face = faceFor(card, faceIndex);
-  const image = imageProxy(face.image || card.image);
-  const doubleFaced = (card.faces?.length ?? 0) > 1;
-
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="card-modal"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <button
-          className="icon-button close"
-          onClick={onClose}
-          type="button"
-          aria-label="Sluiten"
-        >
-          <X />
-        </button>
-
-        {image ? (
-          <img
-            className="card-modal-img"
-            src={image}
-            alt={face.name}
-          />
-        ) : (
-          <div className="large-placeholder">{face.name}</div>
-        )}
-
-        {doubleFaced && (
-          <div className="modal-flip-row">
-            <button
-              type="button"
-              onClick={() =>
-                setFaceIndex(
-                  (current) =>
-                    (current + 1) % (card.faces?.length ?? 1)
-                )
-              }
-            >
-              <ArrowLeftRight size={16} />
-              Draai kaart
-            </button>
-
-            {(card.faces || []).map((item, index) => (
-              <button
-                key={`${item.name}-${index}`}
-                type="button"
-                onClick={() => setFaceIndex(index)}
-                aria-pressed={faceIndex === index}
-              >
-                {index + 1}. {item.name}
-              </button>
-            ))}
-          </div>
-        )}
-
-        <div className="modal-info">
-          <h2>{face.name}</h2>
-          <p>{face.mana_cost}</p>
-          <strong>{face.type_line}</strong>
-          <p>{face.oracle_text}</p>
-          <small>Setkaart-ID: {card.id}</small>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-// --------------------------------------------------
-// App
-// --------------------------------------------------
 
 function App() {
   const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
-
   const [playerName, setPlayerName] = useState(
     () => localStorage.getItem("draft-name") || ""
   );
@@ -585,49 +18,70 @@ function App() {
   const [setsLoading, setSetsLoading] = useState(true);
   const [setsError, setSetsError] = useState("");
   const [setSearch, setSetSearch] = useState("");
-
-  const [activeGameId, setActiveGameId] = useState("");
   const [selectedSet, setSelectedSet] = useState("ltr");
   const [boosterCount, setBoosterCount] = useState(3);
   const [maxPlayers, setMaxPlayers] = useState(8);
-
   const [newTitle, setNewTitle] = useState("");
-  const [chatText, setChatText] = useState("");
 
-  const [draftCards, setDraftCards] = useState<Card[]>([]);
-  const [myPicks, setMyPicks] = useState<Card[]>([]);
+  const [activeGameId, setActiveGameId] = useState("");
+  const [screen, setScreen] = useState<"home" | "game">("home");
+  const [tab, setTab] = useState<"all" | "lobby" | "active">("all");
+  const [notice, setNotice] = useState("");
+  const [spectator, setSpectator] = useState(false);
+
+  const [draftPrivate, setDraftPrivate] =
+    useState<DraftPrivate | null>(null);
+  const [matchPrivate, setMatchPrivate] =
+    useState<MatchPrivate | null>(null);
+
+  const [deckSelection, setDeckSelection] = useState<string[]>([]);
   const [basicLands, setBasicLands] =
     useState<BasicLands>({ ...EMPTY_LANDS });
-  const basicLandsRef = useRef<BasicLands>({ ...EMPTY_LANDS });
+  const [bottomSelection, setBottomSelection] =
+    useState<string[]>([]);
 
-  const [hasPicked, setHasPicked] = useState(false);
-  const [privateStateLoaded, setPrivateStateLoaded] =
-    useState(false);
-  const [privateRound, setPrivateRound] = useState(0);
-  const [privatePick, setPrivatePick] = useState(0);
-  const [privateDirection, setPrivateDirection] =
-    useState<"left" | "right" | null>(null);
+  const [chatText, setChatText] = useState("");
+  const [selectedCard, setSelectedCard] = useState<Card | null>(null);
 
-  const [spectator, setSpectator] = useState(false);
-  const [selectedCard, setSelectedCard] =
-    useState<Card | null>(null);
-
-  const [notice, setNotice] = useState("");
-  const [screen, setScreen] = useState<"home" | "arena">("home");
-  const [tab, setTab] = useState<"all" | "lobby" | "active">(
-    "all"
-  );
+  const [selectedAttackers, setSelectedAttackers] =
+    useState<string[]>([]);
+  const [attackTargets, setAttackTargets] =
+    useState<Record<string, string>>({});
+  const [blockAssignments, setBlockAssignments] =
+    useState<Record<string, string>>({});
+  const [targetPlayerId, setTargetPlayerId] = useState("");
+  const [targetPermanentId, setTargetPermanentId] = useState("");
 
   const chatEnd = useRef<HTMLDivElement>(null);
 
   const activeGame =
     games.find((game) => game.id === activeGameId) ?? null;
 
-  const myPlayer = activeGame?.players.find(
-    (player) => player.id === playerId
+  const myPlayer =
+    activeGame?.players.find((player) => player.id === playerId) ?? null;
+
+  const match = activeGame?.match ?? null;
+  const messages = activeGame?.messages ?? [];
+
+  const isMyTurn = Boolean(
+    activeGame &&
+      match?.activePlayerId === playerId &&
+      !myPlayer?.eliminated
   );
 
-  const messages = activeGame?.messages ?? [];
+  const opponents = (activeGame?.players ?? []).filter(
+    (player) => player.id !== playerId && !player.eliminated
+  );
+
+  const incomingAttacks = (match?.attacks ?? []).filter(
+    (attack) => attack.defenderId === playerId
+  );
+
+  const isDefender = Boolean(
+    match?.blockingPlayerIds?.includes(playerId)
+  );
+
+  const currentMana = matchPrivate?.manaPool ?? EMPTY_MANA;
 
   const filteredGames = useMemo(
     () =>
@@ -649,27 +103,29 @@ function App() {
     return sets.filter(
       (set) =>
         set.name.toLocaleLowerCase().includes(query) ||
-        set.code.toLocaleLowerCase().includes(query) ||
-        (set.set_type || "")
-          .toLocaleLowerCase()
-          .includes(query)
+        set.code.toLowerCase().includes(query) ||
+        (set.set_type || "").toLowerCase().includes(query)
     );
   }, [sets, setSearch]);
 
-  const pickedPlayers =
-    activeGame?.players.filter((player) => player.hasPicked)
-      .length ?? 0;
-
-  const landTotal = BASIC_LANDS.reduce(
-    (total, name) => total + basicLands[name],
+  const selectedDeckCount = deckSelection.length;
+  const landCount = BASIC_LANDS.reduce(
+    (sum, land) => sum + basicLands[land],
     0
   );
+  const deckCount = selectedDeckCount + landCount;
 
-  const deckTotal = myPicks.length + landTotal;
+  const setNoticeMessage = (message: string) => {
+    setNotice(message);
+    window.setTimeout(
+      () => setNotice((current) => current === message ? "" : current),
+      6000
+    );
+  };
 
-  // ------------------------------------------------
-  // Socket.IO
-  // ------------------------------------------------
+  // --------------------------------------------------
+  // Verbinding met de server
+  // --------------------------------------------------
 
   useEffect(() => {
     const connection = io(SERVER, {
@@ -678,29 +134,22 @@ function App() {
 
     setSocket(connection);
 
-    connection.on("connect", () => {
-      setConnected(true);
-    });
-
-    connection.on("disconnect", () => {
-      setConnected(false);
-    });
+    connection.on("connect", () => setConnected(true));
+    connection.on("disconnect", () => setConnected(false));
 
     connection.on(
       "state",
       (data: { games?: Game[]; sets?: SetInfo[] }) => {
         setGames(data.games ?? []);
-
-        if (data.sets?.length) {
-          setSets(data.sets);
-        }
+        if (data.sets?.length) setSets(data.sets);
       }
     );
 
     connection.on(
       "identity",
-      (data: { playerId: string }) => {
+      (data: { playerId: string; playerName?: string }) => {
         setPlayerId(data.playerId);
+        if (data.playerName) setPlayerName(data.playerName);
       }
     );
 
@@ -708,7 +157,7 @@ function App() {
       "game-created",
       (data: { gameId: string }) => {
         setActiveGameId(data.gameId);
-        setScreen("arena");
+        setScreen("game");
         setSpectator(false);
       }
     );
@@ -717,82 +166,100 @@ function App() {
       "game-joined",
       (data: { gameId: string; watching?: boolean }) => {
         setActiveGameId(data.gameId);
-        setScreen("arena");
+        setScreen("game");
         setSpectator(Boolean(data.watching));
       }
     );
 
     connection.on("notice", (message: string) => {
-      setNotice(message);
+      setNoticeMessage(message);
     });
 
-    connection.on(
-      "draft-private-state",
-      (data: PrivateDraftState) => {
-        setActiveGameId(data.gameId);
-        setDraftCards(data.booster ?? []);
-        setMyPicks(data.picks ?? []);
+    connection.on("draft-private-state", (data: DraftPrivate) => {
+      setDraftPrivate(data);
 
-        const lands: BasicLands = {
-          ...EMPTY_LANDS,
-          ...(data.basicLands || {}),
-        };
+      setBasicLands({
+        ...EMPTY_LANDS,
+        ...(data.basicLands || {}),
+      });
 
-        basicLandsRef.current = lands;
-        setBasicLands(lands);
-
-        setHasPicked(Boolean(data.hasPicked));
-        setPrivateRound(Number(data.round) || 0);
-        setPrivatePick(Number(data.pick) || 0);
-        setPrivateDirection(data.direction || null);
-        setPrivateStateLoaded(true);
-
-        setSpectator(false);
-        setScreen("arena");
+      if (data.status === "deckbuilding" && !data.deckReady) {
+        setDeckSelection(data.deckSelection ?? data.picks.map((card) => card.instanceId));
       }
-    );
+
+      if (data.status === "deckbuilding" && data.deckReady) {
+        setDeckSelection(data.deckSelection || []);
+      }
+
+      if (data.status !== "deckbuilding") {
+        setBottomSelection([]);
+      }
+    });
+
+    connection.on("match-private-state", (data: MatchPrivate) => {
+      setMatchPrivate(data);
+      setBasicLands({
+        ...EMPTY_LANDS,
+        ...(data.basicLands || {}),
+      });
+      setDeckSelection(data.deckSelection || []);
+      setSpectator(false);
+
+      if (data.mulliganStatus !== "bottoming") {
+        setBottomSelection([]);
+      }
+    });
 
     connection.on(
       "draft-round-started",
       (data: {
         round: number;
         boosterCount: number;
-        direction: "left" | "right";
+        direction: string;
       }) => {
-        setNotice(
-          `Booster ${data.round}/${data.boosterCount} gestart. Doorgeven naar ${data.direction === "left" ? "links" : "rechts"}.`
+        setNoticeMessage(
+          `Booster ${data.round}/${data.boosterCount} gestart. Doorgeven naar ${
+            data.direction === "left" ? "links" : "rechts"
+          }.`
         );
       }
     );
 
     connection.on("draft-finished", () => {
-      setHasPicked(false);
-      setNotice(
-        "Draft afgerond! Je kunt nu basic lands toevoegen."
+      setNoticeMessage(
+        "Draft afgerond! Bouw nu je deck van minimaal 40 kaarten."
       );
     });
+
+    connection.on(
+      "match-finished",
+      (data: { winnerName?: string }) => {
+        setNoticeMessage(
+          data.winnerName
+            ? `${data.winnerName} wint de game!`
+            : "De match is afgelopen."
+        );
+      }
+    );
 
     return () => {
       connection.disconnect();
     };
   }, []);
 
-  // Spelernaam doorgeven nadat het startscherm is voltooid.
   useEffect(() => {
-    if (joined && socket) {
+    if (joined && socket && connected) {
       socket.emit("join-arena", { playerName });
     }
-  }, [joined, socket, playerName]);
+  }, [joined, socket, connected]);
 
   useEffect(() => {
-    chatEnd.current?.scrollIntoView({
-      behavior: "smooth",
-    });
+    chatEnd.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages.length, activeGameId]);
 
-  // ------------------------------------------------
-  // Volledige setlijst laden
-  // ------------------------------------------------
+  // --------------------------------------------------
+  // Alle beschikbare sets laden
+  // --------------------------------------------------
 
   useEffect(() => {
     let cancelled = false;
@@ -803,7 +270,6 @@ function App() {
 
       try {
         const response = await fetch(`${SERVER}/api/sets`);
-
         if (!response.ok) {
           throw new Error(`HTTP ${response.status}`);
         }
@@ -820,13 +286,12 @@ function App() {
               typeof set.code === "string" &&
               typeof set.name === "string"
           )
-          .sort((a, b) => {
-            return (
+          .sort(
+            (a, b) =>
               String(b.released_at || "").localeCompare(
                 String(a.released_at || "")
               ) || a.name.localeCompare(b.name)
-            );
-          });
+          );
 
         if (!allSets.length) {
           throw new Error("Geen sets ontvangen");
@@ -835,7 +300,6 @@ function App() {
         if (cancelled) return;
 
         setSets(allSets);
-
         setSelectedSet((current) =>
           allSets.some((set) => set.code === current)
             ? current
@@ -846,13 +310,11 @@ function App() {
 
         if (!cancelled) {
           setSetsError(
-            "De volledige setlijst kon niet worden geladen. De standaardsets worden getoond."
+            "De setlijst kon niet volledig worden geladen. De standaardsets blijven beschikbaar."
           );
         }
       } finally {
-        if (!cancelled) {
-          setSetsLoading(false);
-        }
+        if (!cancelled) setSetsLoading(false);
       }
     }
 
@@ -863,15 +325,15 @@ function App() {
     };
   }, []);
 
-  // ------------------------------------------------
-  // Acties
-  // ------------------------------------------------
+  // --------------------------------------------------
+  // Lobbyacties
+  // --------------------------------------------------
 
-  const enter = () => {
+  const enterArena = () => {
     const name = playerName.trim().slice(0, 24);
 
     if (!name) {
-      setNotice("Vul eerst een spelersnaam in.");
+      setNoticeMessage("Vul eerst een spelersnaam in.");
       return;
     }
 
@@ -883,7 +345,7 @@ function App() {
 
   const createGame = () => {
     if (!socket || !connected) {
-      setNotice("De server is nog niet verbonden.");
+      setNoticeMessage("De server is nog niet verbonden.");
       return;
     }
 
@@ -899,7 +361,7 @@ function App() {
     if (!socket) return;
 
     setActiveGameId(game.id);
-    setScreen("arena");
+    setScreen("game");
 
     if (game.status === "lobby") {
       socket.emit("join-game", { gameId: game.id });
@@ -908,8 +370,8 @@ function App() {
     }
   };
 
-  const vote = () => {
-    if (!socket || !activeGameId) return;
+  const sendVote = () => {
+    if (!activeGameId || !socket) return;
 
     socket.emit("vote", {
       gameId: activeGameId,
@@ -919,77 +381,25 @@ function App() {
   };
 
   const startDraft = () => {
-    if (!socket || !activeGameId) return;
+    if (!activeGameId || !socket) return;
 
-    setPrivateStateLoaded(false);
-    socket.emit("start-game", { gameId: activeGameId });
-  };
-
-  const doPick = (card: Card) => {
-    if (!socket || !activeGameId || hasPicked) return;
-
-    const cardId = card.instanceId || card.id;
-
-    socket.emit("pick-card", {
+    socket.emit("start-game", {
       gameId: activeGameId,
-      cardId,
     });
   };
 
-  const updateBasicLand = (
-    name: BasicLand,
-    delta: number
-  ) => {
-    if (
-      !socket ||
-      !activeGameId ||
-      activeGame?.status !== "finished" ||
-      spectator
-    ) {
-      return;
-    }
+  const renamePlayer = () => {
+    const name = playerName.trim().slice(0, 24);
+    if (!name) return;
 
-    const current = basicLandsRef.current;
-    const nextCount = Math.max(
-      0,
-      Math.min(60, current[name] + delta)
-    );
-
-    if (nextCount === current[name]) return;
-
-    const next: BasicLands = {
-      ...current,
-      [name]: nextCount,
-    };
-
-    const total = BASIC_LANDS.reduce(
-      (sum, land) => sum + next[land],
-      0
-    );
-
-    if (total > 100) {
-      setNotice(
-        "Je kunt maximaal 100 basic lands toevoegen."
-      );
-      return;
-    }
-
-    basicLandsRef.current = next;
-    setBasicLands(next);
-
-    socket.emit("set-basic-lands", {
-      gameId: activeGameId,
-      lands: next,
-    });
+    localStorage.setItem("draft-name", name);
+    socket?.emit("rename-player", { playerName: name });
   };
 
-  const sendChat = (
-    event: FormEvent<HTMLFormElement>
-  ) => {
+  const sendChat = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
 
     const text = chatText.trim();
-
     if (!text || !activeGameId || !socket) return;
 
     socket.emit("chat-message", {
@@ -1000,38 +410,248 @@ function App() {
     setChatText("");
   };
 
-  const renamePlayer = () => {
-    const name = playerName.trim().slice(0, 24);
+  const backToHome = () => {
+    setScreen("home");
+    setActiveGameId("");
+    setSelectedCard(null);
+    setSpectator(false);
+    setDraftPrivate(null);
+    setMatchPrivate(null);
+    setSelectedAttackers([]);
+    setBlockAssignments({});
+  };
 
-    if (!name) return;
+  // --------------------------------------------------
+  // Draft- en deckbuildingacties
+  // --------------------------------------------------
 
-    localStorage.setItem("draft-name", name);
+  const pickCard = (card: Card) => {
+    if (!socket || !activeGameId || draftPrivate?.hasPicked) {
+      return;
+    }
 
-    socket?.emit("rename-player", {
-      playerName: name,
+    socket.emit("pick-card", {
+      gameId: activeGameId,
+      cardId: card.instanceId,
     });
   };
 
-  const backToLobby = () => {
-    setScreen("home");
-    setActiveGameId("");
-    setDraftCards([]);
-    setMyPicks([]);
-    setSelectedCard(null);
-    setHasPicked(false);
-    setPrivateStateLoaded(false);
-    setSpectator(false);
+  const toggleDeckCard = (card: Card) => {
+    if (draftPrivate?.deckReady) return;
+
+    setDeckSelection((current) =>
+      current.includes(card.instanceId)
+        ? current.filter((key) => key !== card.instanceId)
+        : [...current, card.instanceId]
+    );
   };
 
-  // ------------------------------------------------
-  // Render
-  // ------------------------------------------------
+  const updateLand = (name: BasicLand, delta: number) => {
+    if (draftPrivate?.deckReady) return;
 
-  return (
-    <>
-      <style>{PLAY_CSS}</style>
+    setBasicLands((current) => {
+      const next = {
+        ...current,
+        [name]: Math.max(0, Math.min(60, current[name] + delta)),
+      };
 
-      {!joined ? (
+      const total = BASIC_LANDS.reduce(
+        (sum, land) => sum + next[land],
+        0
+      );
+
+      if (total > 100) {
+        setNoticeMessage("Je kunt maximaal 100 basic lands toevoegen.");
+        return current;
+      }
+
+      return next;
+    });
+  };
+
+  const submitDeck = () => {
+    if (!socket || !activeGameId || !draftPrivate) return;
+
+    if (deckCount < 40) {
+      setNoticeMessage(
+        `Je deck heeft ${deckCount} kaarten. Voeg nog ${40 - deckCount} kaarten of basic lands toe.`
+      );
+      return;
+    }
+
+    socket.emit("submit-deck", {
+      gameId: activeGameId,
+      cardIds: deckSelection,
+      lands: basicLands,
+    });
+
+    setNoticeMessage(
+      "Deck verstuurd. Wachten tot de andere spelers klaar zijn."
+    );
+  };
+
+  // --------------------------------------------------
+  // Mulliganacties
+  // --------------------------------------------------
+
+  const takeMulligan = () => {
+    if (!socket || !activeGameId) return;
+
+    setBottomSelection([]);
+    socket.emit("take-mulligan", {
+      gameId: activeGameId,
+    });
+  };
+
+  const keepHand = () => {
+    if (!socket || !activeGameId) return;
+
+    socket.emit("keep-hand", {
+      gameId: activeGameId,
+    });
+  };
+
+  const toggleBottomSelection = (card: Card) => {
+    const maxCards = matchPrivate?.bottomNeeded || 0;
+
+    setBottomSelection((current) => {
+      if (current.includes(card.instanceId)) {
+        return current.filter((key) => key !== card.instanceId);
+      }
+
+      if (current.length >= maxCards) {
+        return current;
+      }
+
+      return [...current, card.instanceId];
+    });
+  };
+
+  const submitBottom = () => {
+    if (!socket || !activeGameId || !matchPrivate) return;
+
+    if (bottomSelection.length !== matchPrivate.bottomNeeded) {
+      setNoticeMessage(
+        `Selecteer precies ${matchPrivate.bottomNeeded} kaarten om onderop te leggen.`
+      );
+      return;
+    }
+
+    socket.emit("submit-bottom", {
+      gameId: activeGameId,
+      cardIds: bottomSelection,
+    });
+
+    setBottomSelection([]);
+  };
+
+  // --------------------------------------------------
+  // Matchacties
+  // --------------------------------------------------
+
+  const tapLand = (permanent: Card) => {
+    if (!socket || !activeGameId || !isMyTurn) return;
+
+    socket.emit("tap-land", {
+      gameId: activeGameId,
+      permanentId: permanent.permanentId,
+    });
+  };
+
+  const playCard = (card: Card, faceIndex: number) => {
+    if (!socket || !activeGameId) return;
+
+    socket.emit("play-card", {
+      gameId: activeGameId,
+      cardId: card.instanceId,
+      faceIndex,
+      targetPlayerId: targetPlayerId || undefined,
+      targetPermanentId: targetPermanentId || undefined,
+    });
+  };
+
+  const advancePhase = () => {
+    if (!socket || !activeGameId) return;
+
+    socket.emit("advance-phase", {
+      gameId: activeGameId,
+    });
+  };
+
+  const declareAttackers = () => {
+    if (!socket || !activeGameId || !match) return;
+
+    const attacks = selectedAttackers
+      .map((attackerId) => ({
+        attackerId,
+        defenderId:
+          attackTargets[attackerId] ||
+          opponents[0]?.id,
+      }))
+      .filter(
+        (
+          attack
+        ): attack is {
+          attackerId: string;
+          defenderId: string;
+        } => Boolean(attack.defenderId)
+      );
+
+    socket.emit("declare-attackers", {
+      gameId: activeGameId,
+      attacks,
+    });
+
+    setSelectedAttackers([]);
+    setAttackTargets({});
+  };
+
+  const submitBlockers = () => {
+    if (!socket || !activeGameId) return;
+
+    const assignments = Object.entries(blockAssignments)
+      .filter(([, attackerId]) => Boolean(attackerId))
+      .map(([blockerId, attackerId]) => ({
+        blockerId,
+        attackerId,
+      }));
+
+    socket.emit("assign-blockers", {
+      gameId: activeGameId,
+      assignments,
+    });
+
+    setBlockAssignments({});
+  };
+
+  const concede = () => {
+    if (
+      window.confirm(
+        "Weet je zeker dat je deze match wilt opgeven?"
+      )
+    ) {
+      socket?.emit("concede", {
+        gameId: activeGameId,
+      });
+    }
+  };
+
+  const flipPermanent = (permanent: Card) => {
+    socket?.emit("transform-permanent", {
+      gameId: activeGameId,
+      permanentId: permanent.permanentId,
+    });
+  };
+
+  // --------------------------------------------------
+  // Startscherm
+  // --------------------------------------------------
+
+  if (!joined) {
+    return (
+      <>
+        <style>{EXTRA_CSS}</style>
+
         <main className="start-screen">
           <div className="hero-glow" />
 
@@ -1055,34 +675,34 @@ function App() {
               WELCOME TO THE TABLE
             </div>
 
-            <h2>Jouw volgende draft begint hier.</h2>
+            <h2>Draft samen. Speel samen.</h2>
 
             <p>
-              Stem op een Magic-set, draft kaarten met je
-              vrienden en bouw daarna je eigen pool op.
+              Kies een set, draft met vrienden, bouw je deck en
+              speel een multiplayerwedstrijd.
             </p>
 
-            <label htmlFor="start-player-name">
+            <label htmlFor="player-name-start">
               Spelersnaam
             </label>
 
             <input
-              id="start-player-name"
+              id="player-name-start"
               value={playerName}
               onChange={(event) =>
                 setPlayerName(event.target.value)
               }
               onKeyDown={(event) => {
-                if (event.key === "Enter") enter();
+                if (event.key === "Enter") enterArena();
               }}
-              placeholder="Bijv. GandalfTheGrey"
               maxLength={24}
+              placeholder="Bijv. GandalfTheGrey"
             />
 
             <button
               className="primary full"
-              onClick={enter}
               type="button"
+              onClick={enterArena}
             >
               <Play size={17} />
               Naar de lobby
@@ -1093,1160 +713,1865 @@ function App() {
                 <Users size={15} /> Multiplayer
               </span>
               <span>
-                <Vote size={15} /> Stemmen
+                <Layers size={15} /> Draft
               </span>
               <span>
-                <Layers size={15} /> Kaarten doorgeven
+                <Swords size={15} /> Matches
               </span>
             </div>
           </div>
 
           <div className="start-footer">
             <span
-              className={connected ? "dot online" : "dot"}
+              className={`dot ${connected ? "online" : ""}`}
             />
             {connected
               ? "Server verbonden"
               : "Verbinden met server…"}
-            <span>·</span> Draft Arena
+            <span>·</span>
+            Draft Arena
           </div>
         </main>
-      ) : (
-        <div className="app-shell">
-          <header className="topbar">
-            <button
-              className="brand mini"
-              onClick={backToLobby}
-              type="button"
-            >
-              <div className="brand-icon">
-                <Swords />
-              </div>
+      </>
+    );
+  }
 
+  // --------------------------------------------------
+  // Hoofdinterface
+  // --------------------------------------------------
+
+  return (
+    <>
+      <style>{EXTRA_CSS}</style>
+
+      <div className="app-shell">
+        <header className="topbar">
+          <button
+            className="brand mini"
+            type="button"
+            onClick={backToHome}
+          >
+            <div className="brand-icon">
+              <Swords />
+            </div>
+
+            <div>
+              <span className="eyebrow">MULTIPLAYER</span>
+              <h1>
+                Draft <em>Arena</em>
+              </h1>
+            </div>
+          </button>
+
+          <div className="top-actions">
+            <span
+              className={`connection ${
+                connected ? "good" : ""
+              }`}
+            >
+              <span className="dot" />
+              {connected ? "Live server" : "Offline"}
+            </span>
+
+            <span className="user-chip">
+              <span className="avatar">
+                {playerName.slice(0, 1).toUpperCase()}
+              </span>
+              {playerName}
+            </span>
+          </div>
+        </header>
+
+        {notice && (
+          <div
+            className="arena-toast"
+            role="status"
+            onClick={() => setNotice("")}
+          >
+            {notice}
+            <X size={15} />
+          </div>
+        )}
+
+        {screen === "home" ? (
+          <main className="main-layout">
+            <section className="welcome-row">
               <div>
-                <span className="eyebrow">
-                  MULTIPLAYER
-                </span>
-                <h1>
-                  Draft <em>Arena</em>
-                </h1>
-              </div>
-            </button>
-
-            <div className="top-actions">
-              <span
-                className={`connection ${
-                  connected ? "good" : ""
-                }`}
-              >
-                <span className="dot" />
-                {connected ? "Live server" : "Offline"}
-              </span>
-
-              <span className="user-chip">
-                <span className="avatar">
-                  {playerName.slice(0, 1).toUpperCase()}
-                </span>
-                {playerName}
-              </span>
-            </div>
-          </header>
-
-          {notice && (
-            <div
-              className="toast"
-              role="status"
-              onClick={() => setNotice("")}
-            >
-              {notice}
-              <X size={15} />
-            </div>
-          )}
-
-          {screen === "home" ? (
-            <main className="main-layout">
-              <section className="welcome-row">
-                <div>
-                  <div className="eyebrow">
-                    ARENA OVERVIEW
-                  </div>
-
-                  <h2>
-                    Welkom terug, <em>{playerName}</em>
-                  </h2>
-
-                  <p>
-                    Vind een tafel, stem mee en start een
-                    nieuwe draft.
-                  </p>
+                <div className="eyebrow">
+                  ARENA OVERVIEW
                 </div>
 
-                <div className="live-pill">
-                  <span className="dot online" />
-                  {games.length} games
+                <h2>
+                  Welkom terug, <em>{playerName}</em>
+                </h2>
+
+                <p>
+                  Open een lobby of maak een nieuwe drafttafel.
+                </p>
+              </div>
+
+              <div className="live-pill">
+                <span className="dot online" />
+                {games.length} games
+              </div>
+            </section>
+
+            <div className="dashboard-grid">
+              <section className="panel create-panel">
+                <div className="panel-heading">
+                  <div className="heading-icon purple">
+                    <Plus />
+                  </div>
+
+                  <div>
+                    <h3>Nieuwe lobby</h3>
+                    <p>Maak een tafel voor je vrienden</p>
+                  </div>
+                </div>
+
+                <label htmlFor="lobby-title">
+                  Lobbynaam
+                </label>
+
+                <input
+                  id="lobby-title"
+                  value={newTitle}
+                  onChange={(event) =>
+                    setNewTitle(event.target.value)
+                  }
+                  maxLength={50}
+                  placeholder={`${playerName}'s draft`}
+                />
+
+                <div className="two-fields">
+                  <div>
+                    <label htmlFor="max-players">
+                      Max. spelers
+                    </label>
+
+                    <select
+                      id="max-players"
+                      value={maxPlayers}
+                      onChange={(event) =>
+                        setMaxPlayers(Number(event.target.value))
+                      }
+                    >
+                      {[2, 3, 4, 5, 6, 7, 8].map((number) => (
+                        <option key={number} value={number}>
+                          {number} spelers
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+
+                  <div>
+                    <label htmlFor="rename-player">
+                      Jouw naam
+                    </label>
+
+                    <input
+                      id="rename-player"
+                      value={playerName}
+                      onChange={(event) =>
+                        setPlayerName(event.target.value)
+                      }
+                      onBlur={renamePlayer}
+                      maxLength={24}
+                    />
+                  </div>
+                </div>
+
+                <button
+                  className="primary full"
+                  type="button"
+                  onClick={createGame}
+                >
+                  <Plus size={16} />
+                  Lobby aanmaken
+                </button>
+
+                <div className="mini-note">
+                  <Sparkles size={14} />
+                  Kies samen de set en het aantal boosters.
                 </div>
               </section>
 
-              <div className="dashboard-grid">
-                <section className="panel create-panel">
-                  <div className="panel-heading">
-                    <div className="heading-icon purple">
-                      <Plus />
-                    </div>
-
-                    <div>
-                      <h3>Nieuwe lobby</h3>
-                      <p>Maak een tafel voor je vrienden</p>
-                    </div>
+              <section className="panel games-panel">
+                <div className="panel-heading">
+                  <div className="heading-icon blue">
+                    <Swords />
                   </div>
 
-                  <label htmlFor="lobby-title">
-                    Lobbynaam
-                  </label>
-
-                  <input
-                    id="lobby-title"
-                    value={newTitle}
-                    onChange={(event) =>
-                      setNewTitle(event.target.value)
-                    }
-                    placeholder={`${playerName}'s draft`}
-                    maxLength={50}
-                  />
-
-                  <div className="two-fields">
-                    <div>
-                      <label htmlFor="max-players">
-                        Max. spelers
-                      </label>
-
-                      <select
-                        id="max-players"
-                        value={maxPlayers}
-                        onChange={(event) =>
-                          setMaxPlayers(
-                            Number(event.target.value)
-                          )
-                        }
-                      >
-                        {[2, 3, 4, 5, 6, 7, 8].map(
-                          (number) => (
-                            <option
-                              key={number}
-                              value={number}
-                            >
-                              {number} spelers
-                            </option>
-                          )
-                        )}
-                      </select>
-                    </div>
-
-                    <div>
-                      <label htmlFor="player-name-edit">
-                        Jouw naam
-                      </label>
-
-                      <input
-                        id="player-name-edit"
-                        value={playerName}
-                        onChange={(event) =>
-                          setPlayerName(event.target.value)
-                        }
-                        onBlur={renamePlayer}
-                        maxLength={24}
-                      />
-                    </div>
+                  <div>
+                    <h3>Alle games</h3>
+                    <p>Open tafels en actieve matches</p>
                   </div>
 
+                  <span className="count-badge">
+                    {games.length}
+                  </span>
+                </div>
+
+                <div className="tabs">
                   <button
-                    className="primary full"
-                    onClick={createGame}
                     type="button"
+                    className={
+                      tab === "all" ? "selected" : ""
+                    }
+                    onClick={() => setTab("all")}
                   >
-                    <Plus size={17} />
-                    Lobby aanmaken
+                    Alle <b>{games.length}</b>
                   </button>
 
-                  <div className="mini-note">
-                    <Sparkles size={14} />
-                    Stem met elkaar over set en boosters.
-                  </div>
+                  <button
+                    type="button"
+                    className={
+                      tab === "lobby" ? "selected" : ""
+                    }
+                    onClick={() => setTab("lobby")}
+                  >
+                    Lobby's{" "}
+                    <b>
+                      {
+                        games.filter(
+                          (game) => game.status === "lobby"
+                        ).length
+                      }
+                    </b>
+                  </button>
+
+                  <button
+                    type="button"
+                    className={
+                      tab === "active" ? "selected" : ""
+                    }
+                    onClick={() => setTab("active")}
+                  >
+                    Bezig{" "}
+                    <b>
+                      {
+                        games.filter(
+                          (game) => game.status !== "lobby"
+                        ).length
+                      }
+                    </b>
+                  </button>
+                </div>
+
+                <div className="game-list">
+                  {filteredGames.length === 0 ? (
+                    <div className="empty-state">
+                      <div className="empty-icon">
+                        <Users />
+                      </div>
+
+                      <strong>Nog geen games</strong>
+
+                      <span>
+                        Maak een lobby om te beginnen.
+                      </span>
+                    </div>
+                  ) : (
+                    filteredGames.map((game) => (
+                      <div
+                        className="game-row"
+                        key={game.id}
+                      >
+                        <div className="game-art">
+                          <Layers />
+                        </div>
+
+                        <div className="game-details">
+                          <strong>{game.title}</strong>
+                          <span>{game.setName}</span>
+
+                          <div className="game-meta">
+                            <span>
+                              <Users size={13} />
+                              {game.players.length}/{game.maxPlayers}
+                            </span>
+
+                            <span
+                              className={`status ${
+                                game.status !== "lobby"
+                                  ? "playing"
+                                  : ""
+                              }`}
+                            >
+                              {game.status === "lobby"
+                                ? "Lobby"
+                                : game.status === "loading-draft" ||
+                                    game.status === "loading-match"
+                                  ? "Laden"
+                                  : game.status === "deckbuilding"
+                                    ? "Deck bouwen"
+                                    : game.status === "mulligan"
+                                      ? "Mulligan"
+                                      : game.status === "playing"
+                                        ? "Match"
+                                        : game.status === "finished"
+                                          ? "Afgelopen"
+                                          : "Draft"}
+                            </span>
+                          </div>
+                        </div>
+
+                        <button
+                          className="join-button"
+                          type="button"
+                          onClick={() => joinGame(game)}
+                        >
+                          {game.status === "lobby"
+                            ? "Join"
+                            : "Open"}
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
+              </section>
+            </div>
+          </main>
+        ) : (
+          <main className="game-layout">
+            <div className="game-main">
+              <button
+                className="back-link"
+                type="button"
+                onClick={backToHome}
+              >
+                <ArrowLeft size={16} />
+                Alle games
+              </button>
+
+              {!activeGame ? (
+                <section className="panel play-section">
+                  <h2>Game niet gevonden</h2>
                 </section>
-
-                <section className="panel games-panel">
-                  <div className="panel-heading">
-                    <div className="heading-icon blue">
-                      <Swords />
-                    </div>
-
+              ) : (
+                <>
+                  <div className="game-title-row">
                     <div>
-                      <h3>Alle games</h3>
-                      <p>Open en actieve tafels</p>
+                      <div className="eyebrow">
+                        {activeGame.status === "lobby"
+                          ? "LOBBY ROOM"
+                          : "DRAFT ARENA MATCH"}
+                      </div>
+
+                      <h2>{activeGame.title}</h2>
+                      <p>{activeGame.setName}</p>
                     </div>
 
-                    <span className="count-badge">
-                      {games.length}
+                    <span
+                      className={`status large ${
+                        activeGame.status !== "lobby"
+                          ? "playing"
+                          : ""
+                      }`}
+                    >
+                      {activeGame.status === "lobby"
+                        ? "Lobby open"
+                        : activeGame.status === "deckbuilding"
+                          ? "Deck bouwen"
+                          : activeGame.status === "mulligan"
+                            ? "Mulligan"
+                            : activeGame.status === "playing"
+                              ? "Match bezig"
+                              : activeGame.status === "finished"
+                                ? "Game afgelopen"
+                                : "Bezig"}
                     </span>
                   </div>
 
-                  <div className="tabs">
-                    <button
-                      className={
-                        tab === "all" ? "selected" : ""
-                      }
-                      onClick={() => setTab("all")}
-                      type="button"
-                    >
-                      Alle <b>{games.length}</b>
-                    </button>
-
-                    <button
-                      className={
-                        tab === "lobby" ? "selected" : ""
-                      }
-                      onClick={() => setTab("lobby")}
-                      type="button"
-                    >
-                      Lobby's{" "}
-                      <b>
-                        {
-                          games.filter(
-                            (game) =>
-                              game.status === "lobby"
-                          ).length
-                        }
-                      </b>
-                    </button>
-
-                    <button
-                      className={
-                        tab === "active" ? "selected" : ""
-                      }
-                      onClick={() => setTab("active")}
-                      type="button"
-                    >
-                      Bezig{" "}
-                      <b>
-                        {
-                          games.filter(
-                            (game) =>
-                              game.status !== "lobby"
-                          ).length
-                        }
-                      </b>
-                    </button>
-                  </div>
-
-                  <div className="game-list">
-                    {filteredGames.length === 0 ? (
-                      <div className="empty-state">
-                        <div className="empty-icon">
-                          <Users />
-                        </div>
-                        <strong>Nog geen games</strong>
-                        <span>
-                          Maak de eerste lobby om te beginnen.
-                        </span>
+                  <section className="panel roster-panel">
+                    <div className="panel-heading">
+                      <div className="heading-icon blue">
+                        <Users />
                       </div>
-                    ) : (
-                      filteredGames.map((game) => (
-                        <div
-                          className="game-row"
-                          key={game.id}
-                        >
-                          <div className="game-art">
-                            <Layers />
-                          </div>
 
-                          <div className="game-details">
-                            <strong>{game.title}</strong>
-                            <span>{game.setName}</span>
-
-                            <div className="game-meta">
-                              <span>
-                                <Users size={13} />
-                                {game.players.length}/
-                                {game.maxPlayers}
-                              </span>
-
-                              <span
-                                className={`status ${
-                                  game.status !== "lobby"
-                                    ? "playing"
-                                    : ""
-                                }`}
-                              >
-                                {game.status === "lobby"
-                                  ? "Lobby open"
-                                  : game.status === "finished"
-                                    ? "Afgelopen"
-                                    : game.status === "loading"
-                                      ? "Kaarten laden"
-                                      : "Bezig"}
-                              </span>
-                            </div>
-                          </div>
-
-                          <button
-                            className="join-button"
-                            onClick={() => joinGame(game)}
-                            type="button"
-                          >
-                            {game.status === "lobby"
-                              ? "Join"
-                              : "Bekijk"}
-                          </button>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </section>
-              </div>
-            </main>
-          ) : (
-            <main className="game-layout">
-              <div className="game-main">
-                <button
-                  className="back-link"
-                  onClick={backToLobby}
-                  type="button"
-                >
-                  <ArrowLeft size={16} />
-                  Alle games
-                </button>
-
-                {!activeGame ? (
-                  <div className="panel empty-game">
-                    <h2>Selecteer een game</h2>
-                    <p>Kies een lobby uit het overzicht.</p>
-                  </div>
-                ) : (
-                  <>
-                    <div className="game-title-row">
                       <div>
-                        <div className="eyebrow">
-                          {activeGame.status === "lobby"
-                            ? "LOBBY ROOM"
-                            : "DRAFT ARENA"}
-                        </div>
-
-                        <h2>{activeGame.title}</h2>
-                        <p>{activeGame.setName}</p>
+                        <h3>Spelers</h3>
+                        <p>
+                          {activeGame.players.length} van{" "}
+                          {activeGame.maxPlayers} plaatsen gevuld
+                        </p>
                       </div>
-
-                      <span
-                        className={`status large ${
-                          activeGame.status !== "lobby"
-                            ? "playing"
-                            : ""
-                        }`}
-                      >
-                        {activeGame.status === "lobby"
-                          ? "Lobby open"
-                          : activeGame.status === "loading"
-                            ? "Boosterpacks laden"
-                            : activeGame.status === "finished"
-                              ? "Draft afgelopen"
-                              : "Draft bezig"}
-                      </span>
                     </div>
 
-                    <section className="panel roster-panel">
+                    <div className="roster">
+                      {activeGame.players.map((player, index) => (
+                        <div
+                          className="roster-player"
+                          key={player.id}
+                        >
+                          <div
+                            className={`avatar ${
+                              index === 0 ? "host-avatar" : ""
+                            }`}
+                          >
+                            {player.name.slice(0, 1).toUpperCase()}
+                          </div>
+
+                          <div>
+                            <strong>{player.name}</strong>
+                            <span>
+                              {player.isHost
+                                ? "Host"
+                                : player.id === playerId
+                                  ? "Jij"
+                                  : "Speler"}
+
+                              {player.deckReady
+                                ? " · deck klaar"
+                                : ""}
+
+                              {player.life != null && match
+                                ? ` · ${player.life} leven`
+                                : ""}
+                            </span>
+                          </div>
+
+                          {player.isHost && (
+                            <span className="host-tag">
+                              HOST
+                            </span>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+
+                  {/* Lobby en setstemming */}
+                  {activeGame.status === "lobby" && (
+                    <section className="panel vote-panel">
                       <div className="panel-heading">
-                        <div className="heading-icon blue">
-                          <Users />
+                        <div className="heading-icon gold">
+                          <Vote />
                         </div>
 
                         <div>
-                          <h3>Spelers</h3>
+                          <h3>Stem voor de draft</h3>
                           <p>
-                            {activeGame.players.length} van{" "}
-                            {activeGame.maxPlayers} plaatsen gevuld
+                            Kies een set en het aantal boosters.
                           </p>
                         </div>
                       </div>
 
-                      <div className="roster">
-                        {activeGame.players.map(
-                          (player, index) => (
-                            <div
-                              className="roster-player"
-                              key={player.id}
-                            >
-                              <div
-                                className={`avatar ${
-                                  index === 0
-                                    ? "host-avatar"
-                                    : ""
-                                }`}
-                              >
-                                {player.name
-                                  .slice(0, 1)
-                                  .toUpperCase()}
-                              </div>
+                      <label htmlFor="set-search">
+                        <Search
+                          size={13}
+                          style={{
+                            display: "inline",
+                            marginRight: 5,
+                          }}
+                        />
+                        Zoek set
+                      </label>
 
-                              <div>
-                                <strong>{player.name}</strong>
-                                <span>
-                                  {player.isHost
-                                    ? "Host"
-                                    : player.id === playerId
-                                      ? "Jij"
-                                      : "Speler"}
-                                  {activeGame.status ===
-                                    "drafting" &&
-                                    player.hasPicked
-                                    ? " · pick gedaan"
-                                    : ""}
-                                </span>
-                              </div>
+                      <input
+                        id="set-search"
+                        type="search"
+                        value={setSearch}
+                        onChange={(event) =>
+                          setSetSearch(event.target.value)
+                        }
+                        placeholder="Zoek op naam of setcode…"
+                      />
 
-                              {player.isHost && (
-                                <span className="host-tag">
-                                  HOST
-                                </span>
-                              )}
-                            </div>
-                          )
-                        )}
-                      </div>
-                    </section>
+                      <div
+                        style={{
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          margin: "8px 0",
+                        }}
+                      >
+                        <small>
+                          {setsLoading
+                            ? "Sets laden…"
+                            : `${filteredSets.length} van ${sets.length} sets`}
+                        </small>
 
-                    {activeGame.status === "lobby" ? (
-                      <section className="panel vote-panel">
-                        <div className="panel-heading">
-                          <div className="heading-icon gold">
-                            <Vote />
-                          </div>
-
-                          <div>
-                            <h3>Stem voor de draft</h3>
-                            <p>
-                              Kies een set en aantal boosters.
-                            </p>
-                          </div>
-                        </div>
-
-                        <div className="vote-fields">
-                          <div>
-                            <label htmlFor="set-search">
-                              Zoek een Magic-set
-                            </label>
-
-                            <div
-                              style={{
-                                display: "flex",
-                                alignItems: "center",
-                                gap: 8,
-                                marginBottom: 8,
-                              }}
-                            >
-                              <Search size={18} />
-
-                              <input
-                                id="set-search"
-                                className="set-search-input"
-                                type="search"
-                                value={setSearch}
-                                onChange={(event) =>
-                                  setSetSearch(
-                                    event.target.value
-                                  )
-                                }
-                                placeholder="Naam of setcode…"
-                              />
-                            </div>
-
-                            <div
-                              style={{
-                                display: "flex",
-                                justifyContent: "space-between",
-                                marginBottom: 8,
-                              }}
-                            >
-                              <small>
-                                {setsLoading
-                                  ? "Sets laden…"
-                                  : `${filteredSets.length} van ${sets.length} sets`}
-                              </small>
-
-                              {setsLoading && (
-                                <LoaderCircle
-                                  size={15}
-                                  className="spin"
-                                />
-                              )}
-                            </div>
-
-                            {setsError && (
-                              <p
-                                style={{
-                                  color: "#eab308",
-                                  fontSize: ".85rem",
-                                }}
-                              >
-                                {setsError}
-                              </p>
-                            )}
-
-                            <div
-                              style={{
-                                maxHeight: 260,
-                                overflowY: "auto",
-                                border: "1px solid var(--border,#343746)",
-                                borderRadius: 10,
-                                padding: 5,
-                              }}
-                            >
-                              {filteredSets.length === 0 ? (
-                                <div style={{ padding: 15 }}>
-                                  Geen sets gevonden.
-                                </div>
-                              ) : (
-                                filteredSets.map((set) => {
-                                  const selected =
-                                    selectedSet === set.code;
-
-                                  return (
-                                    <button
-                                      className={`set-option ${
-                                        selected
-                                          ? "selected"
-                                          : ""
-                                      }`}
-                                      type="button"
-                                      role="option"
-                                      aria-selected={selected}
-                                      key={set.code}
-                                      onClick={() =>
-                                        setSelectedSet(set.code)
-                                      }
-                                    >
-                                      <span className="set-option-code">
-                                        {set.code.toUpperCase()}
-                                      </span>
-
-                                      <span className="set-option-name">
-                                        {set.name}
-                                        {set.released_at && (
-                                          <small>
-                                            {set.released_at}
-                                            {set.set_type
-                                              ? ` · ${set.set_type}`
-                                              : ""}
-                                          </small>
-                                        )}
-                                      </span>
-
-                                      {selected && (
-                                        <span className="set-option-check">
-                                          ✓
-                                        </span>
-                                      )}
-                                    </button>
-                                  );
-                                })
-                              )}
-                            </div>
-
-                            <p className="subtle-note">
-                              Gekozen:{" "}
-                              <strong>
-                                {sets.find(
-                                  (set) =>
-                                    set.code === selectedSet
-                                )?.name || selectedSet}
-                              </strong>
-                            </p>
-                          </div>
-
-                          <div>
-                            <label>
-                              Aantal boosters per speler
-                            </label>
-
-                            <div className="booster-options">
-                              {[1, 2, 3, 4, 5, 6].map(
-                                (number) => (
-                                  <button
-                                    key={number}
-                                    type="button"
-                                    className={
-                                      boosterCount === number
-                                        ? "booster selected"
-                                        : "booster"
-                                    }
-                                    onClick={() =>
-                                      setBoosterCount(number)
-                                    }
-                                  >
-                                    <span>{number}</span>
-                                    <small>
-                                      {number === 1
-                                        ? "booster"
-                                        : "boosters"}
-                                    </small>
-                                  </button>
-                                )
-                              )}
-                            </div>
-                          </div>
-                        </div>
-
-                        <div className="vote-footer">
-                          <div className="vote-summary">
-                            <span>
-                              <Vote size={15} />
-                              Stemmen tellen live mee
-                            </span>
-                            <small>
-                              Setstemmen:{" "}
-                              {countVotes(
-                                activeGame.votes,
-                                "sets"
-                              )}
-                              {" · "}
-                              Boosters:{" "}
-                              {countVotes(
-                                activeGame.votes,
-                                "boosters"
-                              )}
-                            </small>
-                          </div>
-
-                          <button
-                            className="secondary"
-                            onClick={vote}
-                            type="button"
-                          >
-                            Stem uitbrengen
-                          </button>
-                        </div>
-
-                        {myPlayer?.isHost && (
-                          <button
-                            className="primary full start-draft"
-                            onClick={startDraft}
-                            type="button"
-                          >
-                            <Play size={17} />
-                            Start draft
-                          </button>
-                        )}
-
-                        <p className="subtle-note">
-                          Na het starten krijgt iedere speler
-                          automatisch een booster van 14 kaarten.
-                        </p>
-                      </section>
-                    ) : activeGame.status === "loading" ? (
-                      <section className="panel draft-panel">
-                        <div className="draft-status-box">
+                        {setsLoading && (
                           <LoaderCircle
-                            size={24}
+                            size={14}
                             className="spin"
                           />
+                        )}
+                      </div>
+
+                      {setsError && (
+                        <p className="subtle-note">{setsError}</p>
+                      )}
+
+                      <div
+                        style={{
+                          maxHeight: 260,
+                          overflowY: "auto",
+                          border: "1px solid #2f3748",
+                          borderRadius: 10,
+                          padding: 5,
+                        }}
+                      >
+                        {filteredSets.map((set) => (
+                          <button
+                            type="button"
+                            key={set.code}
+                            className={`set-option ${
+                              selectedSet === set.code
+                                ? "selected"
+                                : ""
+                            }`}
+                            onClick={() => setSelectedSet(set.code)}
+                          >
+                            <span className="set-option-code">
+                              {set.code.toUpperCase()}
+                            </span>
+
+                            <span className="set-option-name">
+                              {set.name}
+
+                              <small>
+                                {set.released_at || ""}
+                                {set.set_type
+                                  ? ` · ${set.set_type}`
+                                  : ""}
+                              </small>
+                            </span>
+
+                            {selectedSet === set.code && (
+                              <span className="set-option-check">
+                                ✓
+                              </span>
+                            )}
+                          </button>
+                        ))}
+
+                        {filteredSets.length === 0 && (
+                          <div className="empty-zone">
+                            Geen sets gevonden.
+                          </div>
+                        )}
+                      </div>
+
+                      <label>Aantal boosters per speler</label>
+
+                      <div className="booster-options">
+                        {[1, 2, 3, 4, 5, 6].map((number) => (
+                          <button
+                            type="button"
+                            key={number}
+                            className={`booster ${
+                              boosterCount === number
+                                ? "selected"
+                                : ""
+                            }`}
+                            onClick={() =>
+                              setBoosterCount(number)
+                            }
+                          >
+                            <span>{number}</span>
+                            <small>
+                              {number === 1
+                                ? "booster"
+                                : "boosters"}
+                            </small>
+                          </button>
+                        ))}
+                      </div>
+
+                      <div className="vote-footer">
+                        <div className="vote-summary">
+                          <span>
+                            <Vote size={14} />
+                            Stemmen tellen live mee
+                          </span>
+
+                          <small>
+                            Setstemmen:{" "}
+                            {countVotes(
+                              activeGame.votes,
+                              "sets"
+                            )}
+                            {" · "}
+                            Boosters:{" "}
+                            {countVotes(
+                              activeGame.votes,
+                              "boosters"
+                            )}
+                          </small>
+                        </div>
+
+                        <button
+                          className="secondary"
+                          type="button"
+                          onClick={sendVote}
+                        >
+                          Stem uitbrengen
+                        </button>
+                      </div>
+
+                      {myPlayer?.isHost && (
+                        <button
+                          className="primary full"
+                          type="button"
+                          onClick={startDraft}
+                        >
+                          <Play size={16} />
+                          Start draft
+                        </button>
+                      )}
+                    </section>
+                  )}
+
+                  {/* Draftsets ophalen */}
+                  {activeGame.status === "loading-draft" && (
+                    <section className="panel play-section">
+                      <div className="status-box">
+                        <LoaderCircle className="spin" />
+                        <div>
+                          <strong>Draft voorbereiden</strong>
+                          <p>
+                            Scryfall-kaarten worden opgehaald.
+                          </p>
+                        </div>
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Draft */}
+                  {activeGame.status === "drafting" && (
+                    <section className="panel play-section">
+                      <div className="section-bar">
+                        <div>
+                          <h3>
+                            Booster {draftPrivate?.round || activeGame.draftRound}/
+                            {activeGame.boosterCount}
+                          </h3>
+                          <p>
+                            Pick {draftPrivate?.pick || activeGame.draftPick}
+                            {" · "}
+                            {draftPrivate?.direction === "left"
+                              ? "Naar links"
+                              : "Naar rechts"}
+                          </p>
+                        </div>
+
+                        <span className="count-badge">
+                          {draftPrivate?.booster.length ?? 0} kaarten
+                        </span>
+                      </div>
+
+                      <div className="game-stats">
+                        <div className="stat-card">
+                          <span>Jouw picks</span>
+                          <strong>
+                            {draftPrivate?.picks.length ?? 0}
+                          </strong>
+                        </div>
+                        <div className="stat-card">
+                          <span>Spelers die klaar zijn</span>
+                          <strong>
+                            {
+                              activeGame.players.filter(
+                                (player) => player.hasPicked
+                              ).length
+                            }
+                            /{activeGame.players.length}
+                          </strong>
+                        </div>
+                        <div className="stat-card">
+                          <span>Kaarten per booster</span>
+                          <strong>14</strong>
+                        </div>
+                      </div>
+
+                      <div className="progress-track">
+                        <div
+                          className="progress-fill"
+                          style={{
+                            width: `${
+                              activeGame.players.length
+                                ? ((activeGame.players.filter(
+                                    (player) => player.hasPicked
+                                  ).length /
+                                    activeGame.players.length) *
+                                  100)
+                                : 0
+                            }%`,
+                          }}
+                        />
+                      </div>
+
+                      {draftPrivate?.hasPicked && (
+                        <div className="status-box">
+                          <CheckCircle2 color="#8be0b4" />
                           <div>
-                            <strong>Boosters samenstellen</strong>
+                            <strong>Pick opgeslagen</strong>
                             <p>
-                              De kaarten worden opgehaald en de
-                              persoonlijke boosters worden klaargezet.
+                              Wachten tot de andere spelers gekozen
+                              hebben. Je booster wordt daarna automatisch
+                              doorgegeven.
                             </p>
                           </div>
                         </div>
-                      </section>
-                    ) : activeGame.status === "drafting" ? (
-                      <section className="panel draft-panel">
-                        {spectator || !myPlayer ? (
-                          <div className="draft-status-box">
-                            <Eye size={25} />
+                      )}
+
+                      {spectator ? (
+                        <div className="empty-zone">
+                          Je kijkt mee als toeschouwer.
+                        </div>
+                      ) : (
+                        <div className="card-grid">
+                          {(draftPrivate?.booster || []).map((card) => (
+                            <CardTile
+                              key={card.instanceId}
+                              card={card}
+                              onPreview={setSelectedCard}
+                              onPick={pickCard}
+                              disabled={Boolean(
+                                draftPrivate?.hasPicked
+                              )}
+                            />
+                          ))}
+                        </div>
+                      )}
+
+                      <h3 className="zone-title">
+                        Jouw gekozen kaarten (
+                        {draftPrivate?.picks.length ?? 0})
+                      </h3>
+
+                      <div className="card-grid">
+                        {(draftPrivate?.picks || []).map((card) => (
+                          <CardTile
+                            key={card.instanceId}
+                            card={card}
+                            onPreview={setSelectedCard}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Deckbuilding */}
+                  {activeGame.status === "deckbuilding" && (
+                    <section className="panel play-section">
+                      <div className="section-bar">
+                        <div>
+                          <h3>
+                            <BookOpen
+                              size={17}
+                              style={{
+                                display: "inline",
+                                marginRight: 7,
+                              }}
+                            />
+                            Bouw je deck
+                          </h3>
+                          <p>
+                            Selecteer je kaarten en voeg basic lands toe.
+                          </p>
+                        </div>
+
+                        <span className="count-badge">
+                          {draftPrivate?.deckReady
+                            ? "Deck ingediend"
+                            : "Deck bouwen"}
+                        </span>
+                      </div>
+
+                      <div className="game-stats">
+                        <div className="stat-card">
+                          <span>Geselecteerde kaarten</span>
+                          <strong>{selectedDeckCount}</strong>
+                        </div>
+                        <div className="stat-card">
+                          <span>Basic lands</span>
+                          <strong>{landCount}</strong>
+                        </div>
+                        <div className="stat-card">
+                          <span>Totaal</span>
+                          <strong>{deckCount}/40</strong>
+                        </div>
+                      </div>
+
+                      <div className="progress-track">
+                        <div
+                          className="progress-fill"
+                          style={{
+                            width: `${Math.min(100, deckCount / 40 * 100)}%`,
+                          }}
+                        />
+                      </div>
+
+                      <p className="subtle-note">
+                        Kies minimaal 40 kaarten. Je kunt kaarten uit je
+                        pool aan- en uitzetten.
+                      </p>
+
+                      <h3 className="zone-title">
+                        Basic lands toevoegen
+                      </h3>
+
+                      <div className="land-grid">
+                        {BASIC_LANDS.map((land) => (
+                          <div className="land-item" key={land}>
+                            <div className="land-symbol">
+                              <Mountain size={18} />
+                            </div>
+
+                            <div className="land-desc">
+                              <strong>{land}</strong>
+                              <small>Basic land</small>
+                            </div>
+
+                            <div className="land-count">
+                              <button
+                                type="button"
+                                disabled={
+                                  basicLands[land] <= 0 ||
+                                  Boolean(draftPrivate?.deckReady)
+                                }
+                                onClick={() =>
+                                  updateLand(land, -1)
+                                }
+                                aria-label={`Minder ${land}`}
+                              >
+                                <Minus size={12} />
+                              </button>
+
+                              <strong>
+                                {basicLands[land]}
+                              </strong>
+
+                              <button
+                                type="button"
+                                disabled={
+                                  landCount >= 100 ||
+                                  basicLands[land] >= 60 ||
+                                  Boolean(draftPrivate?.deckReady)
+                                }
+                                onClick={() =>
+                                  updateLand(land, 1)
+                                }
+                                aria-label={`Meer ${land}`}
+                              >
+                                <Plus size={12} />
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+
+                      <h3 className="zone-title">
+                        Jouw draftpool ({draftPrivate?.picks.length ?? 0})
+                      </h3>
+
+                      <div className="card-grid">
+                        {(draftPrivate?.picks || []).map((card) => (
+                          <CardTile
+                            key={card.instanceId}
+                            card={card}
+                            selected={deckSelection.includes(
+                              card.instanceId
+                            )}
+                            onToggle={toggleDeckCard}
+                            onPreview={setSelectedCard}
+                          />
+                        ))}
+                      </div>
+
+                      <div className="board-actions">
+                        <button
+                          className="primary"
+                          type="button"
+                          disabled={
+                            Boolean(draftPrivate?.deckReady) ||
+                            deckCount < 40
+                          }
+                          onClick={submitDeck}
+                        >
+                          <CheckCircle2 size={16} />
+                          Deck bevestigen ({deckCount})
+                        </button>
+
+                        <button
+                          className="secondary"
+                          type="button"
+                          disabled={Boolean(draftPrivate?.deckReady)}
+                          onClick={() => {
+                            setDeckSelection(
+                              draftPrivate?.picks.map(
+                                (card) => card.instanceId
+                              ) || []
+                            );
+                            setBasicLands({ ...EMPTY_LANDS });
+                          }}
+                        >
+                          Reset selectie
+                        </button>
+                      </div>
+
+                      {draftPrivate?.deckReady && (
+                        <div className="status-box">
+                          <CheckCircle2 color="#8be0b4" />
+                          <div>
+                            <strong>Deck ingediend</strong>
+                            <p>
+                              Wachten tot alle andere spelers hun deck
+                              hebben ingediend.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                  )}
+
+                  {/* Match voorbereiden */}
+                  {activeGame.status === "loading-match" && (
+                    <section className="panel play-section">
+                      <div className="status-box">
+                        <LoaderCircle className="spin" />
+                        <div>
+                          <strong>Match voorbereiden</strong>
+                          <p>
+                            De decks worden geschud en de openingshanden
+                            worden uitgedeeld.
+                          </p>
+                        </div>
+                      </div>
+                    </section>
+                  )}
+
+                  {/* Mulligan */}
+                  {activeGame.status === "mulligan" && (
+                    <section className="panel play-section">
+                      <div className="section-bar">
+                        <div>
+                          <h3>Openingshand</h3>
+                          <p>
+                            Houd je hand of neem een mulligan.
+                          </p>
+                        </div>
+
+                        <span className="count-badge">
+                          Mulligans:{" "}
+                          {matchPrivate?.mulligansTaken ?? 0}
+                        </span>
+                      </div>
+
+                      {spectator || !matchPrivate ? (
+                        <div className="empty-zone">
+                          Je kijkt mee terwijl spelers hun openingshand
+                          kiezen.
+                        </div>
+                      ) : matchPrivate.mulliganStatus === "deciding" ? (
+                        <>
+                          <div className="status-box">
+                            <Hand size={20} />
                             <div>
                               <strong>
-                                Je kijkt mee als toeschouwer
+                                Houd je hand of neem een mulligan
                               </strong>
                               <p>
-                                De kaartkeuzes en boosters van andere
-                                spelers blijven privé tijdens de draft.
+                                Neem een nieuwe openingshand als je
+                                onvoldoende bruikbare kaarten hebt. De
+                                server bepaalt hoeveel kaarten na het
+                                houden onderop moeten.
                               </p>
                             </div>
                           </div>
-                        ) : (
-                          <>
-                            <div className="panel-heading">
-                              <div className="heading-icon purple">
-                                <Layers />
-                              </div>
 
-                              <div>
-                                <h3>
-                                  Booster{" "}
-                                  {privateRound ||
-                                    activeGame.draftRound}
-                                  /
-                                  {activeGame.boosterCount}
-                                </h3>
-                                <p>
-                                  Pick{" "}
-                                  {privatePick ||
-                                    activeGame.draftPick}
-                                  /14 ·{" "}
-                                  {draftCards.length} kaarten
-                                  over
-                                </p>
-                              </div>
+                          <div className="card-grid">
+                            {matchPrivate.hand.map((card) => (
+                              <CardTile
+                                key={card.instanceId}
+                                card={card}
+                                onPreview={setSelectedCard}
+                              />
+                            ))}
+                          </div>
+
+                          <div className="board-actions">
+                            <button
+                              className="primary"
+                              type="button"
+                              onClick={keepHand}
+                            >
+                              <CheckCircle2 size={16} />
+                              Hand houden
+                            </button>
+
+                            <button
+                              className="secondary"
+                              type="button"
+                              onClick={takeMulligan}
+                            >
+                              <RotateCcw size={15} />
+                              Mulligan nemen
+                            </button>
+                          </div>
+                        </>
+                      ) : matchPrivate.mulliganStatus === "bottoming" ? (
+                        <>
+                          <div className="status-box">
+                            <ArrowLeftRight size={20} />
+                            <div>
+                              <strong>
+                                Kies {matchPrivate.bottomNeeded} kaarten
+                                om onderop te leggen
+                              </strong>
+                              <p>
+                                Geselecteerd: {bottomSelection.length}/
+                                {matchPrivate.bottomNeeded}
+                              </p>
                             </div>
+                          </div>
 
-                            <div className="play-summary">
-                              <div className="play-summary-item">
-                                <span>Booster</span>
-                                <strong>
-                                  {privateRound ||
-                                    activeGame.draftRound}
-                                  /{activeGame.boosterCount}
-                                </strong>
-                              </div>
+                          <div className="card-grid">
+                            {matchPrivate.hand.map((card) => (
+                              <CardTile
+                                key={card.instanceId}
+                                card={card}
+                                selected={bottomSelection.includes(
+                                  card.instanceId
+                                )}
+                                onToggle={toggleBottomSelection}
+                                onPreview={setSelectedCard}
+                              />
+                            ))}
+                          </div>
 
-                              <div className="play-summary-item">
-                                <span>Pick</span>
-                                <strong>
-                                  {privatePick ||
-                                    activeGame.draftPick}
-                                  /14
-                                </strong>
-                              </div>
+                          <button
+                            className="primary full"
+                            type="button"
+                            disabled={
+                              bottomSelection.length !==
+                              matchPrivate.bottomNeeded
+                            }
+                            onClick={submitBottom}
+                          >
+                            Kaarten onderop leggen
+                          </button>
+                        </>
+                      ) : (
+                        <div className="status-box">
+                          <CheckCircle2 />
+                          <div>
+                            <strong>Je hand is vastgezet</strong>
+                            <p>
+                              Wachten tot de andere spelers klaar zijn.
+                            </p>
+                          </div>
+                        </div>
+                      )}
+                    </section>
+                  )}
 
-                              <div className="play-summary-item">
-                                <span>Gekozen</span>
-                                <strong>{myPicks.length}</strong>
-                              </div>
-
-                              <div className="play-summary-item">
-                                <span>Doorgifte</span>
-                                <strong>
-                                  {privateDirection === "left"
-                                    ? "← Links"
-                                    : privateDirection === "right"
-                                      ? "Rechts →"
-                                      : activeGame.direction ===
-                                          "left"
-                                        ? "← Links"
-                                        : "Rechts →"}
-                                </strong>
-                              </div>
-                            </div>
-
-                            <div className="draft-status-box">
-                              {hasPicked ? (
-                                <CheckCircle2
-                                  size={23}
-                                  color="#86efac"
-                                />
-                              ) : (
-                                <ArrowLeftRight size={23} />
-                              )}
-
-                              <div>
-                                <strong>
-                                  {hasPicked
-                                    ? "Je kaart is gekozen"
-                                    : "Kies één kaart"}
-                                </strong>
-                                <p>
-                                  {hasPicked
-                                    ? "Je resterende booster wordt automatisch doorgegeven zodra de andere spelers ook hebben gekozen."
-                                    : "Je kunt een kaart bekijken of flippen voordat je deze kiest."}
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="pick-progress-track">
-                              <div
-                                className="pick-progress-fill"
+                  {/* Speelbord */}
+                  {activeGame.status === "playing" && match && (
+                    <>
+                      <section className="panel play-section">
+                        <div className="section-bar">
+                          <div>
+                            <h3>
+                              <Swords
+                                size={17}
                                 style={{
-                                  width: `${
-                                    activeGame.players.length
-                                      ? (pickedPlayers /
-                                          activeGame.players.length) *
-                                        100
-                                      : 0
-                                  }%`,
+                                  display: "inline",
+                                  marginRight: 7,
                                 }}
                               />
-                            </div>
+                              Spelbord
+                            </h3>
 
-                            <small>
-                              {pickedPlayers} van{" "}
-                              {activeGame.players.length} spelers
-                              hebben hun huidige pick gedaan.
-                            </small>
+                            <p>
+                              Beurt {match.turnNumber} ·{" "}
+                              {match.phase === "main1"
+                                ? "Hoofdfase 1"
+                                : match.phase === "combat"
+                                  ? `Combat — ${match.combatStep}`
+                                  : match.phase === "main2"
+                                    ? "Hoofdfase 2"
+                                    : match.phase === "end"
+                                      ? "Eindfase"
+                                      : match.phase}
+                            </p>
+                          </div>
 
-                            {draftCards.length > 0 ? (
-                              <div className="play-card-grid">
-                                {draftCards.map((card) => (
-                                  <CardTile
-                                    key={
-                                      card.instanceId || card.id
-                                    }
-                                    card={card}
-                                    disabled={hasPicked}
-                                    onPick={() => doPick(card)}
-                                    onPreview={setSelectedCard}
-                                  />
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="draft-status-box">
-                                <LoaderCircle
-                                  size={22}
-                                  className="spin"
-                                />
-                                <div>
-                                  <strong>
-                                    Wachten op je booster
-                                  </strong>
-                                  <p>
-                                    De server deelt de volgende
-                                    booster automatisch uit.
-                                  </p>
-                                </div>
-                              </div>
+                          <span
+                            className={`status ${
+                              isMyTurn ? "playing" : ""
+                            }`}
+                          >
+                            {isMyTurn
+                              ? "Jouw beurt"
+                              : `${
+                                  activeGame.players.find(
+                                    (player) =>
+                                      player.id ===
+                                      match.activePlayerId
+                                  )?.name || "Tegenstander"
+                                } speelt`}
+                          </span>
+                        </div>
+
+                        <div className="game-stats">
+                          <div className="stat-card">
+                            <span>Jouw leven</span>
+                            <strong>
+                              <Heart
+                                size={15}
+                                style={{
+                                  display: "inline",
+                                  color: "#ff9eae",
+                                }}
+                              />{" "}
+                              {myPlayer?.life ?? 20}
+                            </strong>
+                          </div>
+
+                          <div className="stat-card">
+                            <span>Hand</span>
+                            <strong>
+                              {matchPrivate?.hand.length ?? 0}
+                            </strong>
+                          </div>
+
+                          <div className="stat-card">
+                            <span>Library</span>
+                            <strong>
+                              {matchPrivate?.libraryCount ?? 0}
+                            </strong>
+                          </div>
+
+                          <div className="stat-card">
+                            <span>Land gespeeld</span>
+                            <strong>
+                              {matchPrivate?.landPlayed ? "Ja" : "Nee"}
+                            </strong>
+                          </div>
+                        </div>
+
+                        <div className="mana-row">
+                          {COLORS.map((color) => (
+                            <span
+                              className="mana-pill"
+                              title={MANA_LABEL[color]}
+                              key={color}
+                            >
+                              {color}:{" "}
+                              <strong>
+                                {currentMana[color] || 0}
+                              </strong>
+                            </span>
+                          ))}
+                        </div>
+
+                        {isMyTurn && (
+                          <div className="turn-actions">
+                            {(match.phase === "main1" ||
+                              match.phase === "main2" ||
+                              match.phase === "end") && (
+                              <button
+                                className="primary"
+                                type="button"
+                                onClick={advancePhase}
+                              >
+                                {match.phase === "main1"
+                                  ? "Naar combat"
+                                  : match.phase === "main2"
+                                    ? "Naar eindfase"
+                                    : "Einde beurt"}
+                                <ChevronRight size={15} />
+                              </button>
                             )}
 
-                            {hasPicked && (
-                              <p className="draft-lock-note">
-                                <CheckCircle2 size={16} />
-                                Geen tweede pick mogelijk deze beurt.
-                              </p>
-                            )}
-
-                            {myPlayer.isHost && (
-                              <div className="play-action-row">
+                            {match.phase === "combat" &&
+                              match.combatStep === "attackers" && (
                                 <button
                                   className="secondary"
                                   type="button"
-                                  onClick={() =>
-                                    socket?.emit("end-game", {
-                                      gameId: activeGame.id,
-                                    })
-                                  }
+                                  onClick={advancePhase}
                                 >
-                                  Draft beëindigen
+                                  Combat overslaan
                                 </button>
-                              </div>
-                            )}
-                          </>
-                        )}
+                              )}
 
-                        {!spectator && (
-                          <div className="pool-heading">
-                            <div>
-                              <h3>Jouw picks</h3>
-                              <p>
-                                {myPicks.length} kaarten in je
-                                persoonlijke draftpool
-                              </p>
-                            </div>
+                            <button
+                              className="secondary"
+                              type="button"
+                              onClick={concede}
+                            >
+                              <Flag size={14} />
+                              Opgeven
+                            </button>
                           </div>
                         )}
 
-                        {!spectator && myPicks.length > 0 && (
-                          <div className="drafted-pool">
-                            {myPicks
-                              .slice(-12)
-                              .map((card) => (
-                                <CardTile
-                                  key={
-                                    card.instanceId || card.id
-                                  }
-                                  card={card}
-                                  compact
-                                  onPreview={setSelectedCard}
-                                />
-                              ))}
-                          </div>
-                        )}
-                      </section>
-                    ) : (
-                      <section className="panel draft-panel">
-                        {!myPlayer || spectator ? (
-                          <div className="draft-status-box">
-                            <CheckCircle2 size={25} />
-                            <div>
-                              <strong>Draft afgerond</strong>
-                              <p>
-                                Je bekijkt deze game als toeschouwer.
-                              </p>
-                            </div>
-                          </div>
-                        ) : (
-                          <>
-                            <div className="panel-heading">
-                              <div className="heading-icon purple">
-                                <CheckCircle2 />
-                              </div>
-
-                              <div>
-                                <h3>Je draft is klaar!</h3>
-                                <p>
-                                  Bekijk je kaartenpool en voeg
-                                  basic lands toe aan je deck.
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="deck-count-bar">
-                              <div>
-                                <span>Decktotaal</span>
-                                <br />
-                                <strong>
-                                  {deckTotal} kaarten
-                                </strong>
-                              </div>
-
-                              <div>
-                                <span>Gedraft</span>
-                                <br />
-                                <strong>
-                                  {myPicks.length}
-                                </strong>
-                              </div>
-
-                              <div>
-                                <span>Basic lands</span>
-                                <br />
-                                <strong>{landTotal}</strong>
-                              </div>
-                            </div>
-
-                            <div className="pool-heading">
-                              <div>
-                                <h3>Basic lands toevoegen</h3>
-                                <p>
-                                  Kies hoeveel basislanden je wilt
-                                  toevoegen. Je kunt dit aanpassen.
-                                </p>
-                              </div>
-                            </div>
-
-                            <div className="basic-land-grid">
-                              {BASIC_LANDS.map((land) => (
-                                <div
-                                  className="basic-land-card"
-                                  key={land}
-                                >
-                                  <div className="land-symbol">
-                                    <Mountain size={20} />
-                                  </div>
-
-                                  <div className="land-details">
-                                    <strong>{land}</strong>
-                                    <small>Basic land</small>
-                                  </div>
-
-                                  <div className="land-qty">
-                                    <button
-                                      type="button"
-                                      aria-label={`Minder ${land}`}
-                                      disabled={
-                                        basicLands[land] <= 0
-                                      }
-                                      onClick={() =>
-                                        updateBasicLand(
-                                          land,
-                                          -1
-                                        )
-                                      }
-                                    >
-                                      <Minus size={13} />
-                                    </button>
-
-                                    <strong>
-                                      {basicLands[land]}
-                                    </strong>
-
-                                    <button
-                                      type="button"
-                                      aria-label={`Meer ${land}`}
-                                      disabled={
-                                        landTotal >= 100 ||
-                                        basicLands[land] >= 60
-                                      }
-                                      onClick={() =>
-                                        updateBasicLand(
-                                          land,
-                                          1
-                                        )
-                                      }
-                                    >
-                                      <Plus size={13} />
-                                    </button>
-                                  </div>
-                                </div>
-                              ))}
-                            </div>
-
-                            <p className="subtle-note">
-                              Je landaantallen worden op de server
-                              bijgehouden voor deze tijdelijke game.
-                            </p>
-
-                            <div className="pool-heading">
-                              <div>
-                                <h3>Jouw draftpool</h3>
-                                <p>
-                                  {myPicks.length} kaarten gekozen
-                                  tijdens de draft. Flip kaarten om
-                                  de achterkant te bekijken.
-                                </p>
-                              </div>
-                            </div>
-
-                            {myPicks.length > 0 ? (
-                              <div className="drafted-pool">
-                                {myPicks.map((card) => (
-                                  <CardTile
-                                    key={
-                                      card.instanceId || card.id
-                                    }
-                                    card={card}
-                                    compact
-                                    onPreview={setSelectedCard}
-                                  />
-                                ))}
-                              </div>
-                            ) : (
-                              <div className="draft-status-box">
-                                <BookOpen size={22} />
+                        {match.phase === "combat" &&
+                          match.combatStep === "attackers" &&
+                          isMyTurn && (
+                            <>
+                              <div className="status-box">
+                                <Swords size={20} />
                                 <div>
                                   <strong>
-                                    Geen picks opgeslagen
+                                    Kies je aanvallers
                                   </strong>
                                   <p>
-                                    Deze game is mogelijk handmatig
-                                    beëindigd voordat je kaarten kon
-                                    kiezen.
+                                    Selecteer creatures die mogen
+                                    aanvallen en kies hun verdediger.
                                   </p>
                                 </div>
                               </div>
-                            )}
+
+                              {(myPlayer?.battlefield || [])
+                                .filter(
+                                  (card) =>
+                                    cardIsCreature(card) &&
+                                    !card.tapped &&
+                                    (!card.summoningSick ||
+                                      cardHasKeyword(card, "haste"))
+                                )
+                                .map((creature) => (
+                                  <div
+                                    className="land-item"
+                                    key={creature.permanentId}
+                                  >
+                                    <label
+                                      className="deck-select-row"
+                                      style={{ margin: 0 }}
+                                    >
+                                      <input
+                                        type="checkbox"
+                                        checked={selectedAttackers.includes(
+                                          creature.permanentId || ""
+                                        )}
+                                        onChange={() =>
+                                          setSelectedAttackers(
+                                            (current) =>
+                                              current.includes(
+                                                creature.permanentId || ""
+                                              )
+                                                ? current.filter(
+                                                    (key) =>
+                                                      key !==
+                                                      creature.permanentId
+                                                  )
+                                                : [
+                                                    ...current,
+                                                    creature.permanentId || "",
+                                                  ]
+                                          )
+                                        }
+                                      />
+
+                                      <span>
+                                        {creature.name} (
+                                        {powerToughness(creature)})
+                                      </span>
+                                    </label>
+
+                                    <select
+                                      disabled={
+                                        !selectedAttackers.includes(
+                                          creature.permanentId || ""
+                                        )
+                                      }
+                                      value={
+                                        attackTargets[
+                                          creature.permanentId || ""
+                                        ] ||
+                                        opponents[0]?.id ||
+                                        ""
+                                      }
+                                      onChange={(event) =>
+                                        setAttackTargets(
+                                          (current) => ({
+                                            ...current,
+                                            [creature.permanentId || ""]:
+                                              event.target.value,
+                                          })
+                                        )
+                                      }
+                                    >
+                                      {opponents.map((opponent) => (
+                                        <option
+                                          key={opponent.id}
+                                          value={opponent.id}
+                                        >
+                                          {opponent.name} (
+                                          {opponent.life ?? 20} leven)
+                                        </option>
+                                      ))}
+                                    </select>
+                                  </div>
+                                ))}
+
+                              <button
+                                className="primary full"
+                                type="button"
+                                onClick={declareAttackers}
+                              >
+                                Aanvallen bevestigen
+                              </button>
+                            </>
+                          )}
+
+                        {match.phase === "combat" &&
+                          match.combatStep === "blockers" &&
+                          isDefender && (
+                            <>
+                              <div className="status-box">
+                                <Shield size={20} />
+                                <div>
+                                  <strong>
+                                    Kies je blockers
+                                  </strong>
+                                  <p>
+                                    Wijs elk eigen creature toe aan
+                                    maximaal één aanvallend creature.
+                                  </p>
+                                </div>
+                              </div>
+
+                              {(myPlayer?.battlefield || [])
+                                .filter(
+                                  (card) =>
+                                    cardIsCreature(card) &&
+                                    !card.tapped
+                                )
+                                .map((blocker) => (
+                                  <div
+                                    className="land-item"
+                                    key={blocker.permanentId}
+                                  >
+                                    <div className="land-desc">
+                                      <strong>{blocker.name}</strong>
+                                      <small>
+                                        {powerToughness(blocker)}
+                                      </small>
+                                    </div>
+
+                                    <select
+                                      value={
+                                        blockAssignments[
+                                          blocker.permanentId || ""
+                                        ] || ""
+                                      }
+                                      onChange={(event) =>
+                                        setBlockAssignments(
+                                          (current) => ({
+                                            ...current,
+                                            [blocker.permanentId || ""]:
+                                              event.target.value,
+                                          })
+                                        )
+                                      }
+                                    >
+                                      <option value="">
+                                        Niet blocken
+                                      </option>
+
+                                      {incomingAttacks.map(
+                                        (attack) => {
+                                          const owner =
+                                            activeGame.players.find(
+                                              (player) =>
+                                                player.id ===
+                                                attack.attackerControllerId
+                                            );
+
+                                          const attacker =
+                                            owner?.battlefield?.find(
+                                              (card) =>
+                                                card.permanentId ===
+                                                attack.attackerId
+                                            );
+
+                                          return (
+                                            <option
+                                              key={attack.attackerId}
+                                              value={attack.attackerId}
+                                            >
+                                              {attacker?.name ||
+                                                "Attacker"}{" "}
+                                              ({owner?.name})
+                                            </option>
+                                          );
+                                        }
+                                      )}
+                                    </select>
+                                  </div>
+                                ))}
+
+                              <button
+                                className="primary full"
+                                type="button"
+                                onClick={submitBlockers}
+                              >
+                                Blockers bevestigen
+                              </button>
+                            </>
+                          )}
+
+                        {match.phase === "combat" &&
+                          match.combatStep === "blockers" &&
+                          !isDefender && (
+                            <div className="status-box">
+                              <LoaderCircle className="spin" />
+                              <div>
+                                <strong>Wachten op blockers</strong>
+                                <p>
+                                  De verdediger(s) wijzen hun blockers
+                                  toe.
+                                </p>
+                              </div>
+                            </div>
+                          )}
+                      </section>
+
+                      {/* Alle battlefieldkaarten */}
+                      <section className="panel play-section">
+                        <div className="section-bar">
+                          <div>
+                            <h3>Battlefield</h3>
+                            <p>
+                              Permanente kaarten van alle spelers.
+                            </p>
+                          </div>
+                        </div>
+
+                        {activeGame.players
+                          .filter((player) => !player.eliminated)
+                          .map((player) => (
+                            <div
+                              className={`table-player ${
+                                match.activePlayerId === player.id
+                                  ? "active-turn"
+                                  : ""
+                              }`}
+                              key={player.id}
+                            >
+                              <div className="table-player-head">
+                                <div className="table-player-id">
+                                  <span className="avatar">
+                                    {player.name
+                                      .slice(0, 1)
+                                      .toUpperCase()}
+                                  </span>
+
+                                  <div>
+                                    <strong>
+                                      {player.name}
+                                      {player.id === playerId
+                                        ? " (jij)"
+                                        : ""}
+                                    </strong>
+
+                                    <small>
+                                      {player.handCount ?? 0} kaarten
+                                      in hand ·{" "}
+                                      {player.libraryCount ?? 0} in
+                                      library ·{" "}
+                                      {player.graveyard?.length ?? 0} in
+                                      graveyard
+                                    </small>
+                                  </div>
+                                </div>
+
+                                <span className="life-pill">
+                                  <Heart size={14} />
+                                  {player.life ?? 20}
+                                </span>
+                              </div>
+
+                              <div className="battlefield-row">
+                                {!player.battlefield?.length ? (
+                                  <span className="card-tile-meta">
+                                    Nog geen permanents op het battlefield.
+                                  </span>
+                                ) : (
+                                  player.battlefield.map(
+                                    (permanent) => {
+                                      const face =
+                                        faceAt(
+                                          permanent,
+                                          permanent.faceIndex || 0
+                                        );
+
+                                      const image = imgProxy(
+                                        face.image || permanent.image
+                                      );
+
+                                      return (
+                                        <div
+                                          className={`permanent ${
+                                            permanent.tapped
+                                              ? "tapped"
+                                              : ""
+                                          }`}
+                                          key={permanent.permanentId}
+                                        >
+                                          {image ? (
+                                            <img
+                                              src={image}
+                                              alt={permanent.name}
+                                              onClick={() =>
+                                                setSelectedCard(permanent)
+                                              }
+                                            />
+                                          ) : (
+                                            <div className="card-art-placeholder">
+                                              {permanent.name}
+                                            </div>
+                                          )}
+
+                                          <div className="permanent-name">
+                                            {permanent.tapped
+                                              ? "↻ "
+                                              : ""}
+                                            {permanent.name}
+                                          </div>
+
+                                          <div className="permanent-stats">
+                                            {cardIsCreature(permanent)
+                                              ? powerToughness(permanent)
+                                              : permanent.type_line}
+                                            {permanent.damageMarked
+                                              ? ` · ${permanent.damageMarked} schade`
+                                              : ""}
+                                          </div>
+
+                                          {player.id === playerId &&
+                                            isMyTurn &&
+                                            cardIsLand(permanent) && (
+                                              <button
+                                                type="button"
+                                                disabled={Boolean(
+                                                  permanent.tapped
+                                                )}
+                                                onClick={() =>
+                                                  tapLand(permanent)
+                                                }
+                                              >
+                                                Tap voor mana
+                                              </button>
+                                            )}
+
+                                          {player.id === playerId &&
+                                            isMyTurn &&
+                                            permanent.faces &&
+                                            permanent.faces.length > 1 &&
+                                            ["transform", "modal_dfc"].includes(
+                                              permanent.layout || ""
+                                            ) && (
+                                              <button
+                                                type="button"
+                                                onClick={() =>
+                                                  flipPermanent(permanent)
+                                                }
+                                              >
+                                                Flip / transform
+                                              </button>
+                                            )}
+                                        </div>
+                                      );
+                                    }
+                                  )
+                                )}
+                              </div>
+                            </div>
+                          ))}
+                      </section>
+
+                      {/* Handkaarten */}
+                      <section className="panel play-section">
+                        <div className="section-bar">
+                          <div>
+                            <h3>Jouw hand</h3>
+                            <p>
+                              Speel landen, tap mana en cast spells.
+                            </p>
+                          </div>
+
+                          <span className="count-badge">
+                            {matchPrivate?.hand.length ?? 0} kaarten
+                          </span>
+                        </div>
+
+                        {!matchPrivate ? (
+                          <div className="empty-zone">
+                            Je hand wordt geladen…
+                          </div>
+                        ) : (
+                          <>
+                            <div className="land-item">
+                              <div className="land-desc">
+                                <strong>Spell targets</strong>
+                                <small>
+                                  Voor de eenvoudige kaart-effecten die
+                                  een target nodig hebben.
+                                </small>
+                              </div>
+                              <div
+                                className="two-fields"
+                                style={{ width: "100%" }}
+                              >
+                                <div className="select-field">
+                                  <label htmlFor="target-player">
+                                    Target speler
+                                  </label>
+
+                                  <select
+                                    id="target-player"
+                                    value={targetPlayerId}
+                                    onChange={(event) =>
+                                      setTargetPlayerId(
+                                        event.target.value
+                                      )
+                                    }
+                                  >
+                                    <option value="">
+                                      Geen target
+                                    </option>
+                                    {activeGame.players
+                                      .filter((p) => !p.eliminated)
+                                      .map((player) => (
+                                        <option
+                                          key={player.id}
+                                          value={player.id}
+                                        >
+                                          {player.name}
+                                        </option>
+                                      ))}
+                                  </select>
+                                </div>
+
+                                <div className="select-field">
+                                  <label htmlFor="target-permanent">
+                                    Target creature
+                                  </label>
+
+                                  <select
+                                    id="target-permanent"
+                                    value={targetPermanentId}
+                                    onChange={(event) =>
+                                      setTargetPermanentId(
+                                        event.target.value
+                                      )
+                                    }
+                                  >
+                                    <option value="">
+                                      Geen target
+                                    </option>
+
+                                    {activeGame.players.flatMap(
+                                      (player) =>
+                                        (player.battlefield || [])
+                                          .filter((card) =>
+                                            cardIsCreature(card)
+                                          )
+                                          .map((card) => (
+                                            <option
+                                              key={card.permanentId}
+                                              value={card.permanentId}
+                                            >
+                                              {player.name}: {card.name}
+                                            </option>
+                                          ))
+                                    )}
+                                  </select>
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="mana-row">
+                              <span className="mana-pill">
+                                Beschikbare mana
+                              </span>
+                              <span className="mana-pill">
+                                {manaLabel(currentMana)}
+                              </span>
+                            </div>
+
+                            <div className="card-grid">
+                              {matchPrivate.hand.map((card) => {
+                                const canCast =
+                                  isMyTurn &&
+                                  (match.phase === "main1" ||
+                                    match.phase === "main2");
+
+                                const instantSpeed =
+                                  cardIsInstantOrFlash(card);
+
+                                return (
+                                  <CardTile
+                                    key={card.instanceId}
+                                    card={card}
+                                    onPreview={setSelectedCard}
+                                    onPlay={playCard}
+                                    disabled={
+                                      !canCast && !instantSpeed
+                                    }
+                                  />
+                                );
+                              })}
+                            </div>
                           </>
                         )}
                       </section>
-                    )}
-                  </>
+                    </> 
+                  )}
+
+                  {/* Eindmatch */}
+                  {activeGame.status === "finished" && (
+                    <section className="panel play-section">
+                      <div className="match-winner">
+                        <CheckCircle2
+                          size={40}
+                          color="#8be0b4"
+                        />
+                        <h2>
+                          {match?.winnerName
+                            ? `${match.winnerName} wint!`
+                            : "Game afgelopen"}
+                        </h2>
+                        <p>
+                          De match is afgerond. Hieronder staat je
+                          persoonlijke draftpool.
+                        </p>
+                      </div>
+
+                      <h3 className="zone-title">
+                        Jouw kaartenpool
+                      </h3>
+
+                      <div className="card-grid">
+                        {(draftPrivate?.picks ||
+                          matchPrivate?.picks ||
+                          []
+                        ).map((card) => (
+                          <CardTile
+                            key={card.instanceId}
+                            card={card}
+                            onPreview={setSelectedCard}
+                          />
+                        ))}
+                      </div>
+                    </section>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Chat blijft rechts beschikbaar */}
+            <aside className="chat-panel panel">
+              <div className="chat-heading">
+                <div className="heading-icon green">
+                  <MessageCircle />
+                </div>
+
+                <div>
+                  <h3>Game chat</h3>
+                  <p>Praat met iedereen aan tafel</p>
+                </div>
+
+                <span className="chat-live">
+                  <span className="dot online" />
+                  LIVE
+                </span>
+              </div>
+
+              <div className="chat-context">
+                {activeGame?.title || "Geen game geselecteerd"}
+              </div>
+
+              <div className="messages">
+                {messages.map((message) => (
+                  <div
+                    className={`message ${
+                      message.system ? "system-message" : ""
+                    }`}
+                    key={message.id}
+                  >
+                    <div className="message-top">
+                      <strong>{message.name}</strong>
+                      <time>
+                        {new Date(message.at).toLocaleTimeString(
+                          [],
+                          {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          }
+                        )}
+                      </time>
+                    </div>
+
+                    <p>{message.text}</p>
+                  </div>
+                ))}
+
+                <div ref={chatEnd} />
+
+                {messages.length === 0 && (
+                  <div className="chat-empty">
+                    <MessageCircle />
+                    <span>
+                      De chat is nog stil.
+                      <br />
+                      Zeg hallo!
+                    </span>
+                  </div>
                 )}
               </div>
 
-              <aside className="chat-panel panel">
-                <div className="chat-heading">
-                  <div className="heading-icon green">
-                    <MessageCircle />
-                  </div>
+              <form
+                className="chat-compose"
+                onSubmit={sendChat}
+              >
+                <input
+                  value={chatText}
+                  onChange={(event) =>
+                    setChatText(event.target.value)
+                  }
+                  placeholder="Typ een bericht…"
+                  maxLength={500}
+                  disabled={!activeGameId}
+                />
 
-                  <div>
-                    <h3>Lobby chat</h3>
-                    <p>Praat met iedereen aan tafel</p>
-                  </div>
-
-                  <span className="chat-live">
-                    <span className="dot online" />
-                    LIVE
-                  </span>
-                </div>
-
-                <div className="chat-context">
-                  {activeGame?.title ||
-                    "Geen game geselecteerd"}
-                </div>
-
-                <div className="messages">
-                  {messages.map((message) => (
-                    <div
-                      className={`message ${
-                        message.system
-                          ? "system-message"
-                          : ""
-                      }`}
-                      key={message.id}
-                    >
-                      <div className="message-top">
-                        <strong>{message.name}</strong>
-                        <time>
-                          {new Date(
-                            message.at
-                          ).toLocaleTimeString([], {
-                            hour: "2-digit",
-                            minute: "2-digit",
-                          })}
-                        </time>
-                      </div>
-
-                      <p>{message.text}</p>
-                    </div>
-                  ))}
-
-                  <div ref={chatEnd} />
-
-                  {messages.length === 0 && (
-                    <div className="chat-empty">
-                      <MessageCircle />
-                      <span>
-                        De chat is nog stil.
-                        <br />
-                        Zeg hallo!
-                      </span>
-                    </div>
-                  )}
-                </div>
-
-                <form
-                  className="chat-compose"
-                  onSubmit={sendChat}
+                <button
+                  className="send-button"
+                  type="submit"
+                  aria-label="Bericht versturen"
+                  disabled={!activeGameId || !chatText.trim()}
                 >
-                  <input
-                    value={chatText}
-                    onChange={(event) =>
-                      setChatText(event.target.value)
-                    }
-                    placeholder="Typ een bericht…"
-                    disabled={!activeGameId}
-                    maxLength={500}
-                  />
+                  <Send size={17} />
+                </button>
+              </form>
 
-                  <button
-                    className="send-button"
-                    type="submit"
-                    disabled={
-                      !activeGameId || !chatText.trim()
-                    }
-                    aria-label="Bericht versturen"
-                  >
-                    <Send size={17} />
-                  </button>
-                </form>
+              <div className="chat-footnote">
+                Draft Arena · realtime multiplayer
+              </div>
+            </aside>
+          </main>
+        )}
 
-                <div className="chat-footnote">
-                  Draft Arena · tijdelijke game
-                </div>
-              </aside>
-            </main>
-          )}
-
-          <footer className="app-footer">
-            <span>
-              Draft Arena <b>2.0</b>
-            </span>
-            <span>
-              <span className="dot online" />
-              Scryfall via Render
-            </span>
-            <span>
-              Draft night <Sparkles size={13} />
-            </span>
-          </footer>
-        </div>
-      )}
+        <footer className="app-footer">
+          <span>
+            Draft Arena <b>3.0</b>
+          </span>
+          <span>
+            <span className="dot online" />
+            Scryfall via Render
+          </span>
+          <span>
+            Draft night <Sparkles size={13} />
+          </span>
+        </footer>
+      </div>
 
       <CardModal
         card={selectedCard}
