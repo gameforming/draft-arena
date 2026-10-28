@@ -5,7 +5,12 @@ import { Server } from "socket.io";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+// --------------------------------------------------
+// Configuratie
+// --------------------------------------------------
+
 const app = express();
+
 app.use(cors({ origin: true }));
 app.use(express.json({ limit: "100kb" }));
 
@@ -22,7 +27,10 @@ const PORT = Number(process.env.PORT) || 3001;
 const games = new Map();
 const clients = new Map();
 
-const allowedSets = [
+const ALLOWED_BOOSTER_COUNTS = [1, 2, 3, 4, 5, 6];
+const SET_CACHE_DURATION = 60 * 60 * 1000;
+
+const FALLBACK_SETS = [
   {
     code: "ltr",
     name: "The Lord of the Rings: Tales of Middle-earth",
@@ -38,13 +46,50 @@ const allowedSets = [
   { code: "fdn", name: "Foundations" },
 ];
 
-const allowedBoosterCounts = [1, 2, 3, 4, 5, 6];
+// De volledige catalogus wordt vanuit Scryfall geladen.
+let setCatalog = [...FALLBACK_SETS];
+let setCatalogUpdatedAt = 0;
+let setCatalogPromise = null;
+
+// --------------------------------------------------
+// Algemene hulpfuncties
+// --------------------------------------------------
 
 function createId() {
   return (
     Math.random().toString(36).slice(2, 10) +
     Date.now().toString(36)
   );
+}
+
+function getSet(code) {
+  return setCatalog.find((set) => set.code === code);
+}
+
+function getClient(socket) {
+  return clients.get(socket.id);
+}
+
+function getPlayer(socket, game) {
+  const client = getClient(socket);
+
+  if (
+    !client ||
+    client.gameId !== game.id ||
+    client.watching
+  ) {
+    return null;
+  }
+
+  return (
+    game.players.find(
+      (player) => player.id === client.playerId
+    ) || null
+  );
+}
+
+function notify(socket, message) {
+  socket.emit("notice", message);
 }
 
 function safePlayer(player) {
@@ -63,12 +108,15 @@ function getVoteTotals(game) {
 
   for (const player of game.players) {
     if (player.voteSet) {
-      sets[player.voteSet] = (sets[player.voteSet] || 0) + 1;
+      sets[player.voteSet] =
+        (sets[player.voteSet] || 0) + 1;
     }
 
     if (player.voteBoosters) {
-      const count = String(player.voteBoosters);
-      boosters[count] = (boosters[count] || 0) + 1;
+      const key = String(player.voteBoosters);
+
+      boosters[key] =
+        (boosters[key] || 0) + 1;
     }
   }
 
@@ -98,11 +146,16 @@ function publicGame(game) {
 function emitState() {
   io.emit("state", {
     games: [...games.values()].map(publicGame),
-    sets: allowedSets,
+    sets: setCatalog,
   });
 }
 
-function addChatMessage(game, playerName, text, system = false) {
+function addChatMessage(
+  game,
+  playerName,
+  text,
+  system = false
+) {
   const message = {
     id: createId(),
     name: system ? "Arena" : playerName,
@@ -120,33 +173,11 @@ function addChatMessage(game, playerName, text, system = false) {
   return message;
 }
 
-function notify(socket, message) {
-  socket.emit("notice", message);
+function addSystemMessage(game, text) {
+  return addChatMessage(game, "Arena", text, true);
 }
 
-function getClient(socket) {
-  return clients.get(socket.id);
-}
-
-function getPlayer(socket, game) {
-  const client = getClient(socket);
-
-  if (
-    !client ||
-    client.gameId !== game.id ||
-    client.watching
-  ) {
-    return null;
-  }
-
-  return (
-    game.players.find(
-      (player) => player.id === client.playerId
-    ) || null
-  );
-}
-
-function leaveCurrentRoom(socket, client) {
+function leaveRoom(socket, client) {
   if (client?.gameId) {
     socket.leave(client.gameId);
   }
@@ -157,11 +188,7 @@ function leaveCurrentRoom(socket, client) {
   }
 }
 
-function addSystemMessage(game, text) {
-  addChatMessage(game, "Arena", text, true);
-}
-
-function chooseWinner(votes, fallback, numeric = false) {
+function chooseWinner(votes, fallback) {
   const entries = Object.entries(votes);
 
   if (entries.length === 0) {
@@ -174,18 +201,112 @@ function chooseWinner(votes, fallback, numeric = false) {
 
   const tied = entries
     .filter(([, count]) => count === highest)
-    .map(([key]) => key)
-    .sort((a, b) =>
-      numeric
-        ? Number(a) - Number(b)
-        : a.localeCompare(b)
-    );
+    .map(([value]) => value)
+    .sort();
 
   if (tied.includes(String(fallback))) {
     return String(fallback);
   }
 
   return tied[0];
+}
+
+// --------------------------------------------------
+// Scryfall: volledige setcatalogus
+// --------------------------------------------------
+
+async function loadSetCatalog(force = false) {
+  const isCacheValid =
+    Date.now() - setCatalogUpdatedAt <
+    SET_CACHE_DURATION;
+
+  if (!force && isCacheValid) {
+    return setCatalog;
+  }
+
+  if (setCatalogPromise) {
+    return setCatalogPromise;
+  }
+
+  setCatalogPromise = (async () => {
+    try {
+      const response = await fetch(
+        "https://api.scryfall.com/sets",
+        {
+          headers: {
+            "User-Agent": "DraftArena/1.2",
+            Accept: "application/json",
+          },
+          signal: AbortSignal.timeout(15000),
+        }
+      );
+
+      if (!response.ok) {
+        throw new Error(
+          `Scryfall returned HTTP ${response.status}`
+        );
+      }
+
+      const data = await response.json();
+
+      if (!Array.isArray(data.data)) {
+        throw new Error(
+          "Scryfall gaf geen geldige setlijst terug."
+        );
+      }
+
+      const allSets = data.data
+        .filter(
+          (set) =>
+            typeof set.code === "string" &&
+            typeof set.name === "string"
+        )
+        .map((set) => ({
+          code: set.code.toLowerCase(),
+          name: set.name,
+          released_at: set.released_at || null,
+          set_type: set.set_type || null,
+        }))
+        .sort((a, b) => {
+          const dateA = a.released_at || "";
+          const dateB = b.released_at || "";
+
+          return (
+            dateB.localeCompare(dateA) ||
+            a.name.localeCompare(b.name)
+          );
+        });
+
+      if (allSets.length === 0) {
+        throw new Error(
+          "Scryfall leverde een lege setlijst op."
+        );
+      }
+
+      setCatalog = allSets;
+      setCatalogUpdatedAt = Date.now();
+
+      console.log(
+        `Scryfall: ${setCatalog.length} sets geladen.`
+      );
+
+      emitState();
+
+      return setCatalog;
+    } catch (error) {
+      console.error(
+        "Scryfall sets ophalen mislukt:",
+        error.message
+      );
+
+      // Bewaar de laatst bekende catalogus bij netwerkproblemen.
+      return setCatalog;
+    } finally {
+      setCatalogPromise = null;
+    }
+  })();
+
+  return setCatalogPromise;
 }
 
 // --------------------------------------------------
@@ -197,46 +318,24 @@ app.get("/api/health", (_req, res) => {
     ok: true,
     service: "draft-arena",
     games: games.size,
+    sets: setCatalog.length,
   });
 });
 
+// Geeft alle bekende Scryfall-sets terug.
+// De frontend kan hierin zoeken op naam en setcode.
 app.get("/api/sets", async (_req, res) => {
-  try {
-    const response = await fetch(
-      "https://api.scryfall.com/sets",
-      {
-        headers: {
-          "User-Agent": "DraftArena/1.1",
-          Accept: "application/json",
-        },
-        signal: AbortSignal.timeout(10000),
-      }
-    );
+  await loadSetCatalog();
 
-    if (!response.ok) {
-      throw new Error(`Scryfall returned ${response.status}`);
-    }
+  res.set(
+    "Cache-Control",
+    "public, max-age=3600"
+  );
 
-    const data = await response.json();
-
-    res.json(
-      (data.data || []).map((set) => ({
-        code: set.code,
-        name: set.name,
-        released_at: set.released_at,
-        set_type: set.set_type,
-      }))
-    );
-  } catch (error) {
-    console.error(
-      "Scryfall sets ophalen mislukt:",
-      error.message
-    );
-
-    res.json(allowedSets);
-  }
+  res.json(setCatalog);
 });
 
+// Details van één kaart ophalen.
 app.get("/api/cards/:id", async (req, res) => {
   const id = String(req.params.id || "");
 
@@ -251,7 +350,7 @@ app.get("/api/cards/:id", async (req, res) => {
       `https://api.scryfall.com/cards/${encodeURIComponent(id)}`,
       {
         headers: {
-          "User-Agent": "DraftArena/1.1",
+          "User-Agent": "DraftArena/1.2",
           Accept: "application/json",
         },
         signal: AbortSignal.timeout(10000),
@@ -264,16 +363,17 @@ app.get("/api/cards/:id", async (req, res) => {
       .send(await response.text());
   } catch (error) {
     console.error(
-      "Scryfall kaart ophalen mislukt:",
+      "Kaart ophalen mislukt:",
       error.message
     );
 
     res.status(502).json({
-      error: "Scryfall is temporarily unreachable.",
+      error: "Scryfall is tijdelijk niet bereikbaar.",
     });
   }
 });
 
+// Kaarten zoeken via Scryfall.
 app.get("/api/card-search", async (req, res) => {
   const query = String(req.query.q || "").slice(0, 160);
 
@@ -288,7 +388,7 @@ app.get("/api/card-search", async (req, res) => {
       `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}`,
       {
         headers: {
-          "User-Agent": "DraftArena/1.1",
+          "User-Agent": "DraftArena/1.2",
           Accept: "application/json",
         },
         signal: AbortSignal.timeout(10000),
@@ -301,18 +401,19 @@ app.get("/api/card-search", async (req, res) => {
       .send(await response.text());
   } catch (error) {
     console.error(
-      "Scryfall kaart zoeken mislukt:",
+      "Kaart zoeken mislukt:",
       error.message
     );
 
     res.status(502).json({
-      error: "Scryfall is temporarily unreachable.",
+      error: "Scryfall is tijdelijk niet bereikbaar.",
     });
   }
 });
 
 // --------------------------------------------------
-// Tijdelijke kaartafbeeldingen via Scryfall
+// Kaartafbeeldingen doorsturen
+// Geen permanente afbeeldingen op de server bewaren.
 // --------------------------------------------------
 
 app.get("/api/image", async (req, res) => {
@@ -335,13 +436,15 @@ app.get("/api/image", async (req, res) => {
     url.protocol !== "https:" ||
     !allowedHosts.has(url.hostname)
   ) {
-    return res.status(400).send("Image host not allowed");
+    return res.status(400).send(
+      "Image host not allowed"
+    );
   }
 
   try {
     const response = await fetch(url, {
       headers: {
-        "User-Agent": "DraftArena/1.1",
+        "User-Agent": "DraftArena/1.2",
       },
       signal: AbortSignal.timeout(15000),
     });
@@ -358,8 +461,10 @@ app.get("/api/image", async (req, res) => {
 
     res.set(
       "Content-Type",
-      response.headers.get("content-type") || "image/jpeg"
+      response.headers.get("content-type") ||
+        "image/jpeg"
     );
+
     res.set("Cache-Control", "public, max-age=3600");
     res.set("X-Content-Type-Options", "nosniff");
 
@@ -379,17 +484,28 @@ app.get("/api/image", async (req, res) => {
 // --------------------------------------------------
 
 const here = path.dirname(fileURLToPath(import.meta.url));
-const clientDist = path.resolve(here, "../../client/dist");
+
+const clientDist = path.resolve(
+  here,
+  "../../client/dist"
+);
 
 app.use(express.static(clientDist));
 
-// Onbekende API-routes moeten een 404 geven.
-// Andere URL's openen de React-app.
-app.get("*", (req, res, next) => {
+// SPA-fallback voor de React-app.
+// Niet-bestaande API-routes krijgen een normale 404.
+app.use((req, res, next) => {
   if (req.path.startsWith("/api/")) {
     return res.status(404).json({
       error: "API endpoint not found",
     });
+  }
+
+  if (
+    req.method !== "GET" &&
+    req.method !== "HEAD"
+  ) {
+    return next();
   }
 
   res.sendFile(
@@ -403,16 +519,16 @@ app.get("*", (req, res, next) => {
 });
 
 // --------------------------------------------------
-// Socket.IO multiplayer
+// Multiplayer via Socket.IO
 // --------------------------------------------------
 
 io.on("connection", (socket) => {
   socket.emit("state", {
     games: [...games.values()].map(publicGame),
-    sets: allowedSets,
+    sets: setCatalog,
   });
 
-  // De speler kiest zijn naam in het startscherm.
+  // Speler betreedt de arena.
   socket.on("join-arena", ({ playerName } = {}) => {
     const previous = getClient(socket);
 
@@ -430,6 +546,22 @@ io.on("connection", (socket) => {
 
     clients.set(socket.id, client);
 
+    // Werk een bestaande naam bij zonder een nieuwe speler-ID
+    // aan te maken als de frontend dit event opnieuw verstuurt.
+    for (const game of games.values()) {
+      const player = game.players.find(
+        (item) => item.id === client.playerId
+      );
+
+      if (player) {
+        player.name = name;
+
+        if (player.isHost) {
+          game.hostName = name;
+        }
+      }
+    }
+
     socket.emit("identity", {
       playerId: client.playerId,
       playerName: client.playerName,
@@ -438,7 +570,7 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Spelersnaam wijzigen.
+  // Speler hernoemen.
   socket.on("rename-player", ({ playerName } = {}) => {
     const client = getClient(socket);
 
@@ -484,86 +616,89 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Een nieuwe lobby aanmaken.
-  socket.on("create-game", ({ title, maxPlayers } = {}) => {
-    const client = getClient(socket);
+  // Nieuwe lobby aanmaken.
+  socket.on(
+    "create-game",
+    ({ title, maxPlayers } = {}) => {
+      const client = getClient(socket);
 
-    if (!client) {
-      return notify(
-        socket,
-        "Kies eerst een spelersnaam."
+      if (!client) {
+        return notify(
+          socket,
+          "Kies eerst een spelersnaam."
+        );
+      }
+
+      const id = createId();
+
+      const gameTitle =
+        String(title || `${client.playerName}'s draft`)
+          .trim()
+          .slice(0, 50) ||
+        `${client.playerName}'s draft`;
+
+      const defaultSet =
+        getSet("ltr") || FALLBACK_SETS[0];
+
+      const host = {
+        id: client.playerId,
+        name: client.playerName,
+        ready: true,
+        isHost: true,
+        connected: true,
+        socketId: socket.id,
+        voteSet: null,
+        voteBoosters: null,
+        hand: [],
+        picks: [],
+        booster: [],
+      };
+
+      const game = {
+        id,
+        title: gameTitle,
+        status: "lobby",
+        setCode: defaultSet.code,
+        setName: defaultSet.name,
+        boosterCount: 3,
+        hostName: client.playerName,
+        players: [host],
+        maxPlayers: Math.max(
+          2,
+          Math.min(8, Number(maxPlayers) || 8)
+        ),
+        createdAt: Date.now(),
+        messages: [],
+        draftRound: 0,
+        draftPick: 0,
+        picksDone: 0,
+      };
+
+      games.set(id, game);
+
+      leaveRoom(socket, client);
+
+      client.gameId = id;
+      client.watching = false;
+
+      socket.join(id);
+
+      addSystemMessage(
+        game,
+        `${host.name} heeft de lobby aangemaakt.`
       );
+
+      // De frontend gebruikt dit event om de nieuwe
+      // lobby meteen te openen.
+      socket.emit("game-created", {
+        gameId: id,
+      });
+
+      emitState();
     }
+  );
 
-    const id = createId();
-
-    const cleanTitle =
-      String(title || `${client.playerName}'s draft`)
-        .trim()
-        .slice(0, 50) ||
-      `${client.playerName}'s draft`;
-
-    const host = {
-      id: client.playerId,
-      name: client.playerName,
-      ready: true,
-      isHost: true,
-      connected: true,
-      socketId: socket.id,
-      voteSet: null,
-      voteBoosters: null,
-      hand: [],
-      picks: [],
-      booster: [],
-    };
-
-    const defaultSet = allowedSets.find(
-      (set) => set.code === "ltr"
-    );
-
-    const game = {
-      id,
-      title: cleanTitle,
-      status: "lobby",
-      setCode: defaultSet.code,
-      setName: defaultSet.name,
-      boosterCount: 3,
-      hostName: client.playerName,
-      players: [host],
-      maxPlayers: Math.max(
-        2,
-        Math.min(8, Number(maxPlayers) || 8)
-      ),
-      createdAt: Date.now(),
-      messages: [],
-      draftRound: 0,
-      draftPick: 0,
-      picksDone: 0,
-    };
-
-    games.set(id, game);
-
-    leaveCurrentRoom(socket, client);
-
-    client.gameId = id;
-    client.watching = false;
-
-    socket.join(id);
-
-    addSystemMessage(
-      game,
-      `${host.name} heeft de lobby aangemaakt.`
-    );
-
-    // De bijgewerkte App.tsx wacht op dit event.
-    socket.emit("game-created", {
-      gameId: id,
-    });
-
-    emitState();
-  });
-
-  // Een open lobby binnenkomen.
+  // Een bestaande lobby binnengaan.
   socket.on("join-game", ({ gameId } = {}) => {
     const client = getClient(socket);
     const game = games.get(String(gameId || ""));
@@ -579,19 +714,19 @@ io.on("connection", (socket) => {
       return notify(socket, "Game niet gevonden.");
     }
 
-    // Als deze speler al deelnemer is, koppel de verbinding opnieuw.
+    // Een speler kan een bestaande deelname herstellen.
     const existingPlayer = game.players.find(
       (player) => player.id === client.playerId
     );
 
     if (existingPlayer) {
-      leaveCurrentRoom(socket, client);
-
-      existingPlayer.connected = true;
-      existingPlayer.socketId = socket.id;
+      leaveRoom(socket, client);
 
       client.gameId = game.id;
       client.watching = false;
+
+      existingPlayer.connected = true;
+      existingPlayer.socketId = socket.id;
 
       socket.join(game.id);
 
@@ -606,7 +741,7 @@ io.on("connection", (socket) => {
     if (game.status !== "lobby") {
       return notify(
         socket,
-        "Deze draft is al bezig. Open de game als toeschouwer."
+        "Deze draft is al bezig. Je kunt hem bekijken als toeschouwer."
       );
     }
 
@@ -628,7 +763,7 @@ io.on("connection", (socket) => {
       booster: [],
     };
 
-    leaveCurrentRoom(socket, client);
+    leaveRoom(socket, client);
 
     game.players.push(player);
 
@@ -649,7 +784,7 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Een actieve of afgelopen game als toeschouwer openen.
+  // Een actieve game bekijken.
   socket.on("watch-game", ({ gameId } = {}) => {
     const client = getClient(socket);
     const game = games.get(String(gameId || ""));
@@ -669,7 +804,7 @@ io.on("connection", (socket) => {
       (player) => player.id === client.playerId
     );
 
-    leaveCurrentRoom(socket, client);
+    leaveRoom(socket, client);
 
     client.gameId = game.id;
     client.watching = !existingPlayer;
@@ -689,14 +824,20 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Stemmen op de set en het aantal boosters.
+  // Stemmen op een set en het aantal boosters.
+  // Alle Scryfall-setcodes worden geaccepteerd, niet alleen
+  // de oorspronkelijke zeven standaardsets.
   socket.on(
     "vote",
     ({ gameId, setCode, boosterCount } = {}) => {
       const client = getClient(socket);
       const game = games.get(String(gameId || ""));
 
-      if (!client || !game || game.status !== "lobby") {
+      if (
+        !client ||
+        !game ||
+        game.status !== "lobby"
+      ) {
         return;
       }
 
@@ -709,16 +850,23 @@ io.on("connection", (socket) => {
         );
       }
 
-      if (
-        setCode &&
-        allowedSets.some((set) => set.code === setCode)
-      ) {
-        player.voteSet = setCode;
+      if (typeof setCode === "string") {
+        const normalizedCode =
+          setCode.trim().toLowerCase();
+
+        // Setcodes worden gecontroleerd op een veilige,
+        // beperkte tekenset. De lijst hoeft hier niet
+        // hard gecodeerd te zijn.
+        if (
+          /^[a-z0-9]{1,8}$/.test(normalizedCode)
+        ) {
+          player.voteSet = normalizedCode;
+        }
       }
 
       const count = Number(boosterCount);
 
-      if (allowedBoosterCounts.includes(count)) {
+      if (ALLOWED_BOOSTER_COUNTS.includes(count)) {
         player.voteBoosters = count;
       }
 
@@ -727,8 +875,56 @@ io.on("connection", (socket) => {
   );
 
   // Lobbychat en gamechat.
-  // Deelnemers en toeschouwers mogen chatten in de game die zij open hebben.
-  socket.on("chat-message", ({ gameId, text } = {}) => {
+  socket.on(
+    "chat-message",
+    ({ gameId, text } = {}) => {
+      const client = getClient(socket);
+      const game = games.get(String(gameId || ""));
+
+      if (!client || !game) {
+        return;
+      }
+
+      if (client.gameId !== game.id) {
+        return notify(
+          socket,
+          "Open eerst deze game om te chatten."
+        );
+      }
+
+      const message = String(text || "")
+        .trim()
+        .slice(0, 500);
+
+      if (!message) {
+        return;
+      }
+
+      const player = getPlayer(socket, game);
+
+      const name = player
+        ? player.name
+        : client.watching
+          ? client.playerName
+          : null;
+
+      if (!name) {
+        return;
+      }
+
+      addChatMessage(game, name, message);
+
+      io.to(game.id).emit(
+        "game-message",
+        publicGame(game)
+      );
+
+      emitState();
+    }
+  );
+
+  // Host start de draft.
+  socket.on("start-game", ({ gameId } = {}) => {
     const client = getClient(socket);
     const game = games.get(String(gameId || ""));
 
@@ -736,54 +932,9 @@ io.on("connection", (socket) => {
       return;
     }
 
-    if (client.gameId !== game.id) {
-      return notify(
-        socket,
-        "Open eerst deze game om te chatten."
-      );
-    }
+    const host = getPlayer(socket, game);
 
-    const message = String(text || "")
-      .trim()
-      .slice(0, 500);
-
-    if (!message) {
-      return;
-    }
-
-    const player = getPlayer(socket, game);
-
-    const name = player
-      ? player.name
-      : client.watching
-        ? client.playerName
-        : null;
-
-    if (!name) {
-      return;
-    }
-
-    addChatMessage(game, name, message);
-
-    io.to(game.id).emit(
-      "game-message",
-      publicGame(game)
-    );
-
-    emitState();
-  });
-
-  // De host start de draft.
-  socket.on("start-game", ({ gameId } = {}) => {
-    const game = games.get(String(gameId || ""));
-
-    if (!game) {
-      return;
-    }
-
-    const player = getPlayer(socket, game);
-
-    if (!player?.isHost || game.status !== "lobby") {
+    if (!host?.isHost || game.status !== "lobby") {
       return notify(
         socket,
         "Alleen de host kan de draft starten."
@@ -793,29 +944,27 @@ io.on("connection", (socket) => {
     if (game.players.length < 2) {
       return notify(
         socket,
-        "Je hebt minimaal 2 spelers nodig. Open de game in een tweede browser om te testen."
+        "Je hebt minimaal 2 spelers nodig."
       );
     }
 
     const setVotes = {};
     const boosterVotes = {};
 
-    for (const member of game.players) {
-      if (member.voteSet) {
-        setVotes[member.voteSet] =
-          (setVotes[member.voteSet] || 0) + 1;
+    for (const player of game.players) {
+      if (player.voteSet) {
+        setVotes[player.voteSet] =
+          (setVotes[player.voteSet] || 0) + 1;
       }
 
-      if (member.voteBoosters) {
-        const key = String(member.voteBoosters);
+      if (player.voteBoosters) {
+        const key = String(player.voteBoosters);
 
         boosterVotes[key] =
           (boosterVotes[key] || 0) + 1;
       }
     }
 
-    // Bij een gelijkspel wint de standaardinstelling als die
-    // een van de opties met de meeste stemmen is.
     const winningSet = chooseWinner(
       setVotes,
       game.setCode
@@ -824,20 +973,20 @@ io.on("connection", (socket) => {
     const winningBoosterCount = Number(
       chooseWinner(
         boosterVotes,
-        String(game.boosterCount),
-        true
+        String(game.boosterCount)
       )
     );
 
     game.setCode = winningSet;
 
     game.setName =
-      allowedSets.find(
-        (set) => set.code === winningSet
-      )?.name || game.setName;
+      getSet(winningSet)?.name ||
+      winningSet.toUpperCase();
 
     game.boosterCount =
-      allowedBoosterCounts.includes(winningBoosterCount)
+      ALLOWED_BOOSTER_COUNTS.includes(
+        winningBoosterCount
+      )
         ? winningBoosterCount
         : 3;
 
@@ -846,10 +995,10 @@ io.on("connection", (socket) => {
     game.draftPick = 1;
     game.picksDone = 0;
 
-    for (const member of game.players) {
-      member.hand = [];
-      member.picks = [];
-      member.booster = [];
+    for (const player of game.players) {
+      player.hand = [];
+      player.picks = [];
+      player.booster = [];
     }
 
     addSystemMessage(
@@ -866,7 +1015,7 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Een booster met kaarten ophalen via Scryfall.
+  // Kaarten ophalen voor de gekozen set.
   socket.on(
     "request-booster",
     async ({ gameId } = {}) => {
@@ -881,31 +1030,53 @@ io.on("connection", (socket) => {
       if (!player) {
         return notify(
           socket,
-          "Alleen deelnemers kunnen kaarten laden."
+          "Alleen spelers in deze draft kunnen kaarten laden."
         );
       }
 
       try {
-        const query = `set:${game.setCode} game:paper`;
+        const headers = {
+          "User-Agent": "DraftArena/1.2",
+          Accept: "application/json",
+        };
 
-        const response = await fetch(
-          `https://api.scryfall.com/cards/search?q=${encodeURIComponent(query)}&order=set&unique=cards`,
+        // Eerst proberen we kaarten die voor boosters zijn
+        // gemarkeerd. Speciale sets hebben die niet altijd.
+        let response = await fetch(
+          `https://api.scryfall.com/cards/search?q=${encodeURIComponent(
+            `set:${game.setCode} game:paper is:booster`
+          )}&order=set&unique=cards`,
           {
-            headers: {
-              "User-Agent": "DraftArena/1.1",
-              Accept: "application/json",
-            },
+            headers,
             signal: AbortSignal.timeout(15000),
           }
         );
 
-        if (!response.ok) {
-          throw new Error(
-            `Scryfall returned ${response.status}`
-          );
-        }
+        let data = response.ok
+          ? await response.json()
+          : { data: [] };
 
-        const data = await response.json();
+        // Als er geen boosterkaarten zijn, proberen we alle
+        // papieren kaartprints uit dezelfde set.
+        if (!Array.isArray(data.data) || !data.data.length) {
+          response = await fetch(
+            `https://api.scryfall.com/cards/search?q=${encodeURIComponent(
+              `set:${game.setCode} game:paper`
+            )}&order=set&unique=cards`,
+            {
+              headers,
+              signal: AbortSignal.timeout(15000),
+            }
+          );
+
+          if (!response.ok) {
+            throw new Error(
+              `Scryfall returned HTTP ${response.status}`
+            );
+          }
+
+          data = await response.json();
+        }
 
         const sourceCards = (data.data || []).filter(
           (card) =>
@@ -915,49 +1086,52 @@ io.on("connection", (socket) => {
             )
         );
 
-        if (sourceCards.length === 0) {
-          throw new Error("No image cards available");
+        if (!sourceCards.length) {
+          throw new Error(
+            "Geen afbeeldingskaarten gevonden voor deze set."
+          );
         }
 
-        // MVP: een willekeurige selectie van maximaal 15 kaarten.
-        // Dit is nog geen officiële Magic-booster.
-        const shuffledCards = [...sourceCards];
+        // Dit is een willekeurige selectie voor de MVP,
+        // geen officieel samengesteld boosterpack.
+        const shuffled = [...sourceCards];
 
-        for (let i = shuffledCards.length - 1; i > 0; i--) {
-          const j = Math.floor(Math.random() * (i + 1));
-          [shuffledCards[i], shuffledCards[j]] = [
-            shuffledCards[j],
-            shuffledCards[i],
+        for (let i = shuffled.length - 1; i > 0; i--) {
+          const j = Math.floor(
+            Math.random() * (i + 1)
+          );
+
+          [shuffled[i], shuffled[j]] = [
+            shuffled[j],
+            shuffled[i],
           ];
         }
 
-        const cards = shuffledCards
-          .slice(0, 15)
-          .map((card) => {
-            const face = card.card_faces?.[0];
+        const cards = shuffled.slice(0, 15).map((card) => {
+          const face = card.card_faces?.[0];
 
-            return {
-              id: card.id,
-              name: card.name,
-              image:
-                card.image_uris?.normal ||
-                face?.image_uris?.normal ||
-                null,
-              small:
-                card.image_uris?.small ||
-                face?.image_uris?.small ||
-                null,
-              mana_cost:
-                card.mana_cost ||
-                face?.mana_cost ||
-                "",
-              type_line: card.type_line || "",
-              oracle_text:
-                card.oracle_text ||
-                face?.oracle_text ||
-                "",
-            };
-          });
+          return {
+            id: card.id,
+            name: card.name,
+            image:
+              card.image_uris?.normal ||
+              face?.image_uris?.normal ||
+              null,
+            small:
+              card.image_uris?.small ||
+              face?.image_uris?.small ||
+              null,
+            mana_cost:
+              card.mana_cost ||
+              face?.mana_cost ||
+              "",
+            type_line: card.type_line || "",
+            oracle_text:
+              card.oracle_text ||
+              face?.oracle_text ||
+              "",
+          };
+        });
 
         player.booster = cards;
 
@@ -969,19 +1143,19 @@ io.on("connection", (socket) => {
         });
       } catch (error) {
         console.error(
-          "Booster laden mislukt:",
+          "Booster ophalen mislukt:",
           error.message
         );
 
         notify(
           socket,
-          "Kon geen booster laden via Scryfall. Probeer het straks opnieuw."
+          "Kon geen kaarten laden voor deze set. Niet alle Scryfall-sets hebben papieren kaarten of boosterprints."
         );
       }
     }
   );
 
-  // Een kaart kiezen uit de persoonlijke booster.
+  // Kaart kiezen uit de persoonlijke booster.
   socket.on("pick-card", ({ gameId, cardId } = {}) => {
     const game = games.get(String(gameId || ""));
 
@@ -1039,7 +1213,7 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Alleen de host mag de game beëindigen.
+  // Game beëindigen.
   socket.on("end-game", ({ gameId } = {}) => {
     const game = games.get(String(gameId || ""));
 
@@ -1074,7 +1248,7 @@ io.on("connection", (socket) => {
     emitState();
   });
 
-  // Verbinding weggevallen.
+  // Verbinding verbroken.
   socket.on("disconnect", (reason) => {
     const client = getClient(socket);
 
@@ -1083,18 +1257,17 @@ io.on("connection", (socket) => {
 
       if (game) {
         const player = game.players.find(
-          (member) =>
-            member.id === client.playerId
+          (item) => item.id === client.playerId
         );
 
         if (player) {
           player.connected = false;
-        }
 
-        addSystemMessage(
-          game,
-          `${client.playerName || "Een speler"} heeft de verbinding verloren.`
-        );
+          addSystemMessage(
+            game,
+            `${player.name} heeft de verbinding verloren.`
+          );
+        }
       }
     }
 
@@ -1109,8 +1282,17 @@ io.on("connection", (socket) => {
 });
 
 // --------------------------------------------------
-// Start server
+// Server starten
 // --------------------------------------------------
+
+// Laad de complete Scryfall-catalogus alvast op de achtergrond.
+// De server kan ondertussen gewoon opstarten.
+loadSetCatalog().catch((error) => {
+  console.error(
+    "Initiële setcatalogus laden mislukt:",
+    error.message
+  );
+});
 
 httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(
