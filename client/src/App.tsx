@@ -20,11 +20,13 @@ import {
   Sparkles,
   ArrowLeft,
   Image as ImageIcon,
+  Search,
+  LoaderCircle,
 } from "lucide-react";
 
 const SERVER =
-  (import.meta as any).env.VITE_SERVER_URL ||
-  window.location.origin;
+  ((import.meta as any).env.VITE_SERVER_URL ||
+    window.location.origin).replace(/\/+$/, "");
 
 type Player = {
   id: string;
@@ -42,9 +44,18 @@ type Msg = {
   system: boolean;
 };
 
+type SetInfo = {
+  code: string;
+  name: string;
+  released_at?: string | null;
+  set_type?: string;
+};
+
 type VoteTotals = {
   sets?: Record<string, number>;
   boosters?: Record<string, number>;
+  mySet?: string;
+  myBoosters?: number;
 };
 
 type Game = {
@@ -75,11 +86,6 @@ type Card = {
   oracle_text: string;
 };
 
-type SetInfo = {
-  code: string;
-  name: string;
-};
-
 const fallbackSets: SetInfo[] = [
   {
     code: "ltr",
@@ -100,11 +106,10 @@ function countVotes(
   votes: VoteTotals | undefined,
   category: "sets" | "boosters"
 ): number {
-  const totals: Record<string, number> =
-    votes?.[category] ?? {};
+  const values = Object.values(votes?.[category] ?? {});
 
-  return Object.values(totals).reduce<number>(
-    (total, count) => total + Number(count || 0),
+  return values.reduce<number>(
+    (total, value) => total + Number(value || 0),
     0
   );
 }
@@ -148,14 +153,14 @@ function useCachedImage(
       return;
     }
 
-    const proxied = proxiedImage(url, size);
+    const proxyUrl = proxiedImage(url, size);
 
-    if (!proxied) {
+    if (!proxyUrl) {
       setSrc("");
       return;
     }
 
-    const cached = imageMemory.get(proxied);
+    const cached = imageMemory.get(proxyUrl);
 
     if (cached) {
       setSrc(cached);
@@ -164,7 +169,7 @@ function useCachedImage(
 
     let cancelled = false;
 
-    fetch(proxied)
+    fetch(proxyUrl)
       .then((response) => {
         if (!response.ok) {
           throw new Error("Afbeelding kon niet worden geladen");
@@ -176,13 +181,12 @@ function useCachedImage(
         if (cancelled) return;
 
         const objectUrl = URL.createObjectURL(blob);
-
-        imageMemory.set(proxied, objectUrl);
+        imageMemory.set(proxyUrl, objectUrl);
         setSrc(objectUrl);
       })
       .catch(() => {
         if (!cancelled) {
-          setSrc(proxied);
+          setSrc(proxyUrl);
         }
       });
 
@@ -240,7 +244,7 @@ function Modal({
   card: Card | null;
   onClose: () => void;
 }) {
-  // De hook wordt altijd aangeroepen, ook wanneer er geen kaart is.
+  // Hooks worden altijd aangeroepen, ook als de modal gesloten is.
   const src = useCachedImage(card?.image ?? null);
 
   if (!card) return null;
@@ -284,9 +288,7 @@ function Modal({
 }
 
 function App() {
-  const [socket, setSocket] = useState<Socket | null>(
-    null
-  );
+  const [socket, setSocket] = useState<Socket | null>(null);
   const [connected, setConnected] = useState(false);
 
   const [playerName, setPlayerName] = useState(
@@ -296,9 +298,10 @@ function App() {
   const [playerId, setPlayerId] = useState("");
 
   const [games, setGames] = useState<Game[]>([]);
-  const [sets, setSets] = useState<SetInfo[]>(
-    fallbackSets
-  );
+  const [sets, setSets] = useState<SetInfo[]>(fallbackSets);
+  const [setsLoading, setSetsLoading] = useState(true);
+  const [setsError, setSetsError] = useState("");
+  const [setSearch, setSetSearch] = useState("");
 
   const [activeGameId, setActiveGameId] = useState("");
   const [selectedSet, setSelectedSet] = useState("ltr");
@@ -317,15 +320,15 @@ function App() {
   const [tab, setTab] = useState<
     "all" | "lobby" | "active"
   >("all");
-  const [screen, setScreen] = useState<
-    "home" | "arena"
-  >("home");
+
+  const [screen, setScreen] = useState<"home" | "arena">(
+    "home"
+  );
 
   const chatEnd = useRef<HTMLDivElement>(null);
 
   const activeGame =
-    games.find((game) => game.id === activeGameId) ??
-    null;
+    games.find((game) => game.id === activeGameId) ?? null;
 
   const myPlayer = activeGame?.players.find(
     (player) => player.id === playerId
@@ -345,7 +348,24 @@ function App() {
     [games, tab]
   );
 
-  // Serververbinding en realtime events.
+  // Zoek door de volledige setlijst op naam of setcode.
+  const filteredSets = useMemo(() => {
+    const query = setSearch.trim().toLocaleLowerCase();
+
+    if (!query) return sets;
+
+    return sets.filter((set) => {
+      return (
+        set.name.toLocaleLowerCase().includes(query) ||
+        set.code.toLocaleLowerCase().includes(query) ||
+        (set.set_type || "")
+          .toLocaleLowerCase()
+          .includes(query)
+      );
+    });
+  }, [sets, setSearch]);
+
+  // De server stuurt multiplayergegevens via Socket.IO.
   useEffect(() => {
     const connection = io(SERVER, {
       transports: ["websocket", "polling"],
@@ -363,29 +383,15 @@ function App() {
 
     connection.on(
       "state",
-      (data: {
-        games?: Game[];
-        sets?: SetInfo[];
-      }) => {
+      (data: { games?: Game[] }) => {
         setGames(data.games ?? []);
-
-        if (data.sets?.length) {
-          setSets(data.sets);
-        }
       }
     );
 
     connection.on(
       "identity",
-      (data: {
-        playerId: string;
-        playerName?: string;
-      }) => {
+      (data: { playerId: string }) => {
         setPlayerId(data.playerId);
-
-        if (data.playerName) {
-          setPlayerName(data.playerName);
-        }
       }
     );
 
@@ -412,10 +418,7 @@ function App() {
 
     connection.on(
       "booster",
-      (data: {
-        gameId: string;
-        cards: Card[];
-      }) => {
+      (data: { gameId: string; cards: Card[] }) => {
         setActiveGameId(data.gameId);
         setDraftCards(data.cards ?? []);
         setMyPicks([]);
@@ -425,16 +428,13 @@ function App() {
 
     connection.on(
       "pick-confirmed",
-      (data: {
-        card: Card;
-        picks: Card[];
-      }) => {
+      (data: { card?: Card; picks: Card[] }) => {
         setMyPicks(data.picks ?? []);
 
         if (data.card) {
           setDraftCards((previous) =>
             previous.filter(
-              (card) => card.id !== data.card.id
+              (card) => card.id !== data.card?.id
             )
           );
         }
@@ -443,6 +443,83 @@ function App() {
 
     return () => {
       connection.disconnect();
+    };
+  }, []);
+
+  // Vraag alle bekende sets rechtstreeks aan onze Render-server.
+  // De server haalt deze lijst bij Scryfall op.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadAllSets() {
+      setSetsLoading(true);
+      setSetsError("");
+
+      try {
+        const response = await fetch(`${SERVER}/api/sets`);
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+
+        const data: unknown = await response.json();
+
+        if (!Array.isArray(data)) {
+          throw new Error("De server gaf geen geldige setlijst terug.");
+        }
+
+        const allSets = (data as SetInfo[])
+          .filter(
+            (set) =>
+              typeof set.code === "string" &&
+              typeof set.name === "string"
+          )
+          .sort((a, b) => {
+            const dateA = a.released_at || "";
+            const dateB = b.released_at || "";
+
+            return (
+              dateB.localeCompare(dateA) ||
+              a.name.localeCompare(b.name)
+            );
+          });
+
+        if (allSets.length === 0) {
+          throw new Error("De server gaf geen sets terug.");
+        }
+
+        if (cancelled) return;
+
+        setSets(allSets);
+
+        setSelectedSet((current) => {
+          if (allSets.some((set) => set.code === current)) {
+            return current;
+          }
+
+          return (
+            allSets.find((set) => set.code === "ltr")?.code ??
+            allSets[0].code
+          );
+        });
+      } catch (error) {
+        if (cancelled) return;
+
+        console.error("Sets laden mislukt:", error);
+        setSetsError(
+          "De volledige lijst kon niet worden geladen. De standaardsets worden getoond."
+        );
+      } finally {
+        if (!cancelled) {
+          setSetsLoading(false);
+        }
+      }
+    }
+
+    void loadAllSets();
+
+    return () => {
+      cancelled = true;
     };
   }, []);
 
@@ -456,7 +533,7 @@ function App() {
     if (joined && socket) {
       socket.emit("join-arena", { playerName });
     }
-  }, [joined, socket]);
+  }, [joined, socket, playerName]);
 
   const enter = () => {
     const name = playerName.trim().slice(0, 24);
@@ -529,9 +606,7 @@ function App() {
   const startDraft = () => {
     if (!activeGameId || !socket) return;
 
-    socket.emit("start-game", {
-      gameId: activeGameId,
-    });
+    socket.emit("start-game", { gameId: activeGameId });
   };
 
   const loadBooster = () => {
@@ -593,9 +668,7 @@ function App() {
         </div>
 
         <div className="start-card">
-          <div className="eyebrow">
-            WELCOME TO THE TABLE
-          </div>
+          <div className="eyebrow">WELCOME TO THE TABLE</div>
 
           <h2>Jouw volgende draft begint hier.</h2>
 
@@ -652,7 +725,7 @@ function App() {
           {connected
             ? "Server verbonden"
             : "Verbinden met server…"}
-          <span>·</span> Versie 1.0 MVP
+          <span>·</span> Versie 1.1
         </div>
       </main>
     );
@@ -712,17 +785,14 @@ function App() {
         <main className="main-layout">
           <section className="welcome-row">
             <div>
-              <div className="eyebrow">
-                ARENA OVERVIEW
-              </div>
+              <div className="eyebrow">ARENA OVERVIEW</div>
 
               <h2>
                 Welkom terug, <em>{playerName}</em>
               </h2>
 
               <p>
-                Vind een tafel, stem mee en start een
-                nieuwe draft.
+                Vind een tafel, stem mee en start een nieuwe draft.
               </p>
             </div>
 
@@ -769,21 +839,14 @@ function App() {
                     id="max-players"
                     value={maxPlayers}
                     onChange={(event) =>
-                      setMaxPlayers(
-                        Number(event.target.value)
-                      )
+                      setMaxPlayers(Number(event.target.value))
                     }
                   >
-                    {[2, 3, 4, 5, 6, 7, 8].map(
-                      (number) => (
-                        <option
-                          key={number}
-                          value={number}
-                        >
-                          {number} spelers
-                        </option>
-                      )
-                    )}
+                    {[2, 3, 4, 5, 6, 7, 8].map((number) => (
+                      <option key={number} value={number}>
+                        {number} spelers
+                      </option>
+                    ))}
                   </select>
                 </div>
 
@@ -842,9 +905,7 @@ function App() {
 
               <div className="tabs">
                 <button
-                  className={
-                    tab === "all" ? "selected" : ""
-                  }
+                  className={tab === "all" ? "selected" : ""}
                   onClick={() => setTab("all")}
                   type="button"
                 >
@@ -852,9 +913,7 @@ function App() {
                 </button>
 
                 <button
-                  className={
-                    tab === "lobby" ? "selected" : ""
-                  }
+                  className={tab === "lobby" ? "selected" : ""}
                   onClick={() => setTab("lobby")}
                   type="button"
                 >
@@ -862,17 +921,14 @@ function App() {
                   <b>
                     {
                       games.filter(
-                        (game) =>
-                          game.status === "lobby"
+                        (game) => game.status === "lobby"
                       ).length
                     }
                   </b>
                 </button>
 
                 <button
-                  className={
-                    tab === "active" ? "selected" : ""
-                  }
+                  className={tab === "active" ? "selected" : ""}
                   onClick={() => setTab("active")}
                   type="button"
                 >
@@ -880,8 +936,7 @@ function App() {
                   <b>
                     {
                       games.filter(
-                        (game) =>
-                          game.status !== "lobby"
+                        (game) => game.status !== "lobby"
                       ).length
                     }
                   </b>
@@ -898,16 +953,12 @@ function App() {
                     <strong>Nog geen games</strong>
 
                     <span>
-                      Maak de eerste lobby en nodig
-                      spelers uit.
+                      Maak de eerste lobby en nodig spelers uit.
                     </span>
                   </div>
                 ) : (
                   visibleGames.map((game) => (
-                    <div
-                      className="game-row"
-                      key={game.id}
-                    >
+                    <div className="game-row" key={game.id}>
                       <div
                         className={`game-art ${
                           game.status !== "lobby"
@@ -925,8 +976,7 @@ function App() {
                         <div className="game-meta">
                           <span>
                             <Users size={13} />
-                            {game.players.length}/
-                            {game.maxPlayers}
+                            {game.players.length}/{game.maxPlayers}
                           </span>
 
                           <span
@@ -1017,50 +1067,45 @@ function App() {
                       <h3>Spelers</h3>
                       <p>
                         {activeGame.players.length} van{" "}
-                        {activeGame.maxPlayers} plaatsen
-                        gevuld
+                        {activeGame.maxPlayers} plaatsen gevuld
                       </p>
                     </div>
                   </div>
 
                   <div className="roster">
-                    {activeGame.players.map(
-                      (player, index) => (
+                    {activeGame.players.map((player, index) => (
+                      <div
+                        className="roster-player"
+                        key={player.id}
+                      >
                         <div
-                          className="roster-player"
-                          key={player.id}
+                          className={`avatar ${
+                            index === 0 ? "host-avatar" : ""
+                          }`}
                         >
-                          <div
-                            className={`avatar ${
-                              index === 0
-                                ? "host-avatar"
-                                : ""
-                            }`}
-                          >
-                            {player.name
-                              .slice(0, 1)
-                              .toUpperCase()}
-                          </div>
-
-                          <div>
-                            <strong>{player.name}</strong>
-                            <span>
-                              {player.isHost
-                                ? "Host"
-                                : player.id === playerId
-                                  ? "Jij"
-                                  : "Speler"}
-                            </span>
-                          </div>
-
-                          {player.isHost && (
-                            <span className="host-tag">
-                              HOST
-                            </span>
-                          )}
+                          {player.name
+                            .slice(0, 1)
+                            .toUpperCase()}
                         </div>
-                      )
-                    )}
+
+                        <div>
+                          <strong>{player.name}</strong>
+                          <span>
+                            {player.isHost
+                              ? "Host"
+                              : player.id === playerId
+                                ? "Jij"
+                                : "Speler"}
+                          </span>
+                        </div>
+
+                        {player.isHost && (
+                          <span className="host-tag">
+                            HOST
+                          </span>
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </section>
 
@@ -1074,36 +1119,234 @@ function App() {
                       <div>
                         <h3>Stem voor de draft</h3>
                         <p>
-                          De meeste stemmen bepalen de
+                          Zoek een set en stem op je favoriete
                           instellingen.
                         </p>
                       </div>
                     </div>
 
                     <div className="vote-fields">
-                      <div>
-                        <label htmlFor="draft-set">
-                          Welke set?
+                      <div className="set-picker">
+                        <label htmlFor="set-search">
+                          Zoek een Magic-set
                         </label>
 
-                        <select
-                          id="draft-set"
-                          value={selectedSet}
-                          onChange={(event) =>
-                            setSelectedSet(
-                              event.target.value
-                            )
-                          }
+                        <div
+                          style={{
+                            display: "flex",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "0 12px",
+                            border: "1px solid var(--border, #343746)",
+                            borderRadius: "10px",
+                            marginBottom: "8px",
+                          }}
                         >
-                          {sets.map((set) => (
-                            <option
-                              key={set.code}
-                              value={set.code}
+                          <Search
+                            size={18}
+                            style={{
+                              flexShrink: 0,
+                              opacity: 0.7,
+                            }}
+                          />
+
+                          <input
+                            id="set-search"
+                            type="search"
+                            value={setSearch}
+                            onChange={(event) =>
+                              setSetSearch(event.target.value)
+                            }
+                            placeholder="Zoek op naam of setcode…"
+                            autoComplete="off"
+                            style={{
+                              border: "none",
+                              outline: "none",
+                              boxShadow: "none",
+                              width: "100%",
+                              minWidth: 0,
+                              padding: "12px 0",
+                              background: "transparent",
+                            }}
+                          />
+
+                          {setSearch && (
+                            <button
+                              type="button"
+                              aria-label="Zoekopdracht wissen"
+                              onClick={() => setSetSearch("")}
+                              style={{
+                                border: 0,
+                                background: "transparent",
+                                cursor: "pointer",
+                                padding: "4px",
+                              }}
                             >
-                              {set.name}
-                            </option>
-                          ))}
-                        </select>
+                              <X size={16} />
+                            </button>
+                          )}
+                        </div>
+
+                        <div
+                          style={{
+                            display: "flex",
+                            justifyContent: "space-between",
+                            alignItems: "center",
+                            gap: "8px",
+                            marginBottom: "8px",
+                          }}
+                        >
+                          <small>
+                            {setsLoading
+                              ? "Sets laden…"
+                              : `${filteredSets.length} van ${sets.length} sets`}
+                          </small>
+
+                          {setsLoading && (
+                            <LoaderCircle
+                              size={15}
+                              className="spin"
+                            />
+                          )}
+                        </div>
+
+                        {setsError && (
+                          <p
+                            role="status"
+                            style={{
+                              fontSize: "0.85rem",
+                              color: "#eab308",
+                              marginBottom: "10px",
+                            }}
+                          >
+                            {setsError}
+                          </p>
+                        )}
+
+                        <div
+                          role="listbox"
+                          aria-label="Beschikbare Magic-sets"
+                          aria-busy={setsLoading}
+                          style={{
+                            maxHeight: "290px",
+                            overflowY: "auto",
+                            border: "1px solid var(--border, #343746)",
+                            borderRadius: "10px",
+                            padding: "5px",
+                          }}
+                        >
+                          {filteredSets.length === 0 ? (
+                            <div
+                              style={{
+                                padding: "18px 12px",
+                                textAlign: "center",
+                                opacity: 0.75,
+                              }}
+                            >
+                              Geen sets gevonden voor “{setSearch}”.
+                            </div>
+                          ) : (
+                            filteredSets.map((set) => {
+                              const selected =
+                                selectedSet === set.code;
+
+                              return (
+                                <button
+                                  key={set.code}
+                                  type="button"
+                                  role="option"
+                                  aria-selected={selected}
+                                  onClick={() =>
+                                    setSelectedSet(set.code)
+                                  }
+                                  style={{
+                                    display: "flex",
+                                    width: "100%",
+                                    alignItems: "center",
+                                    gap: "10px",
+                                    padding: "10px",
+                                    textAlign: "left",
+                                    borderRadius: "7px",
+                                    border: selected
+                                      ? "1px solid #a78bfa"
+                                      : "1px solid transparent",
+                                    background: selected
+                                      ? "rgba(139, 92, 246, 0.18)"
+                                      : "transparent",
+                                    color: "inherit",
+                                    cursor: "pointer",
+                                    marginBottom: "2px",
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      minWidth: "42px",
+                                      padding: "4px 6px",
+                                      textAlign: "center",
+                                      borderRadius: "5px",
+                                      fontSize: "0.75rem",
+                                      fontWeight: 700,
+                                      background: selected
+                                        ? "rgba(139, 92, 246, 0.25)"
+                                        : "rgba(128, 128, 128, 0.12)",
+                                    }}
+                                  >
+                                    {set.code.toUpperCase()}
+                                  </span>
+
+                                  <span
+                                    style={{
+                                      display: "flex",
+                                      flexDirection: "column",
+                                      gap: "3px",
+                                      minWidth: 0,
+                                      flex: 1,
+                                    }}
+                                  >
+                                    <span>{set.name}</span>
+
+                                    {set.released_at && (
+                                      <small
+                                        style={{ opacity: 0.65 }}
+                                      >
+                                        {set.released_at}
+                                        {set.set_type
+                                          ? ` · ${set.set_type}`
+                                          : ""}
+                                      </small>
+                                    )}
+                                  </span>
+
+                                  {selected && (
+                                    <span
+                                      aria-label="Geselecteerd"
+                                      style={{
+                                        color: "#a78bfa",
+                                        fontWeight: 800,
+                                      }}
+                                    >
+                                      ✓
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })
+                          )}
+                        </div>
+
+                        <div
+                          style={{
+                            marginTop: "9px",
+                            fontSize: "0.85rem",
+                          }}
+                        >
+                          Gekozen set:{" "}
+                          <strong>
+                            {sets.find(
+                              (set) => set.code === selectedSet
+                            )?.name || selectedSet}
+                          </strong>
+                        </div>
                       </div>
 
                       <div>
@@ -1112,29 +1355,27 @@ function App() {
                         </label>
 
                         <div className="booster-options">
-                          {[1, 2, 3, 4, 5, 6].map(
-                            (number) => (
-                              <button
-                                key={number}
-                                className={
-                                  boosterCount === number
-                                    ? "booster selected"
-                                    : "booster"
-                                }
-                                onClick={() =>
-                                  setBoosterCount(number)
-                                }
-                                type="button"
-                              >
-                                <span>{number}</span>
-                                <small>
-                                  {number === 1
-                                    ? "booster"
-                                    : "boosters"}
-                                </small>
-                              </button>
-                            )
-                          )}
+                          {[1, 2, 3, 4, 5, 6].map((number) => (
+                            <button
+                              key={number}
+                              type="button"
+                              className={
+                                boosterCount === number
+                                  ? "booster selected"
+                                  : "booster"
+                              }
+                              onClick={() =>
+                                setBoosterCount(number)
+                              }
+                            >
+                              <span>{number}</span>
+                              <small>
+                                {number === 1
+                                  ? "booster"
+                                  : "boosters"}
+                              </small>
+                            </button>
+                          ))}
                         </div>
                       </div>
                     </div>
@@ -1182,10 +1423,9 @@ function App() {
                     )}
 
                     <p className="subtle-note">
-                      De host start wanneer iedereen klaar
-                      is. Bij een gelijkspel wint de
-                      standaardinstelling als die gelijk
-                      eindigt.
+                      De set met de meeste stemmen wint. Scryfall
+                      bevat ook promo- en andere speciale sets;
+                      niet iedere set heeft officiële draftboosters.
                     </p>
                   </section>
                 ) : (
@@ -1210,8 +1450,7 @@ function App() {
                       </div>
 
                       {myPlayer &&
-                        activeGame.status ===
-                          "drafting" && (
+                        activeGame.status === "drafting" && (
                           <button
                             className="secondary small-button"
                             onClick={loadBooster}
@@ -1229,8 +1468,8 @@ function App() {
                           Je kijkt mee als toeschouwer
                         </strong>
                         <span>
-                          Je ziet de gedeelde chat, maar
-                          niet de handkaarten van spelers.
+                          Je ziet de gedeelde chat, maar niet de
+                          handkaarten van spelers.
                         </span>
                       </div>
                     ) : draftCards.length > 0 ? (
@@ -1264,17 +1503,15 @@ function App() {
                           Je booster verschijnt hier
                         </strong>
                         <span>
-                          Klik op “Laad booster” om kaarten
-                          op te halen via Render.
+                          Klik op “Laad booster” om kaarten op
+                          te halen via Render.
                         </span>
                       </div>
                     )}
 
                     {myPicks.length > 0 && (
                       <>
-                        <h4>
-                          Jouw picks ({myPicks.length})
-                        </h4>
+                        <h4>Jouw picks ({myPicks.length})</h4>
 
                         <div className="picks-strip">
                           {myPicks.map((card) => (
@@ -1292,8 +1529,7 @@ function App() {
                     )}
 
                     {myPlayer?.isHost &&
-                      activeGame.status ===
-                        "drafting" && (
+                      activeGame.status === "drafting" && (
                         <div className="game-actions">
                           <button
                             className="secondary"
@@ -1339,21 +1575,21 @@ function App() {
               {messages.map((message) => (
                 <div
                   className={`message ${
-                    message.system
-                      ? "system-message"
-                      : ""
+                    message.system ? "system-message" : ""
                   }`}
                   key={message.id}
                 >
                   <div className="message-top">
                     <strong>{message.name}</strong>
+
                     <time>
-                      {new Date(
-                        message.at
-                      ).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                      {new Date(message.at).toLocaleTimeString(
+                        [],
+                        {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        }
+                      )}
                     </time>
                   </div>
 
@@ -1375,10 +1611,7 @@ function App() {
               )}
             </div>
 
-            <form
-              className="chat-compose"
-              onSubmit={sendChat}
-            >
+            <form className="chat-compose" onSubmit={sendChat}>
               <input
                 value={chatText}
                 onChange={(event) =>
@@ -1392,9 +1625,7 @@ function App() {
               <button
                 className="send-button"
                 type="submit"
-                disabled={
-                  !activeGameId || !chatText.trim()
-                }
+                disabled={!activeGameId || !chatText.trim()}
                 aria-label="Bericht versturen"
               >
                 <Send size={17} />
@@ -1411,7 +1642,7 @@ function App() {
 
       <footer className="app-footer">
         <span>
-          Draft Arena <b>v1.0</b>
+          Draft Arena <b>v1.1</b>
         </span>
 
         <span>
