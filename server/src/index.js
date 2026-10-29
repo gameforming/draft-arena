@@ -98,6 +98,7 @@ function publicGame(game) {
     createdAt: game.createdAt, votes: getVoteTotals(game), messages: game.messages.slice(-60), draftRound: game.draftRound || 0,
     draftPick: game.draftPick || 0, picksDone: game.picksDone || 0, direction: game.direction || null,
     pickProgress: game.players.filter((p) => p.hasPicked).length, match,
+    kickVotes: Object.fromEntries(Object.entries(game.kickVotes || {}).map(([targetId, voters]) => [targetId, Array.isArray(voters) ? voters.length : 0])),
   };
 }
 function emitState() { io.emit("state", { games: [...games.values()].map(publicGame), sets: setCatalog }); }
@@ -234,7 +235,7 @@ function fallbackBasicLand(name) {
     toughness: null,
     loyalty: null,
     cmc: 0,
-    colors: [],
+    colors: [mana],
     color_identity: [mana],
     keywords: [],
     set: "basic",
@@ -632,6 +633,46 @@ app.use((req, res, next) => {
 });
 
 // --------------------- Socket.IO / lobby ---------------------
+function removeLobbyPlayer(game, player, reason = "heeft de lobby verlaten") {
+  if (!game || game.status !== "lobby" || !player) return false;
+
+  const playerSocket = socketForPlayer(player);
+  if (playerSocket) {
+    const playerClient = getClient(playerSocket);
+    playerSocket.leave(game.id);
+    playerSocket.emit("game-left", { gameId: game.id, reason });
+    if (playerClient?.gameId === game.id) {
+      playerClient.gameId = null;
+      playerClient.watching = false;
+    }
+  }
+
+  game.players = game.players.filter((item) => item.id !== player.id);
+  if (game.kickVotes) {
+    delete game.kickVotes[player.id];
+    for (const targetId of Object.keys(game.kickVotes)) {
+      game.kickVotes[targetId] = game.kickVotes[targetId].filter((voterId) => voterId !== player.id);
+      if (!game.kickVotes[targetId].length) delete game.kickVotes[targetId];
+    }
+  }
+
+  if (!game.players.length) {
+    games.delete(game.id);
+    emitState();
+    return true;
+  }
+
+  if (!game.players.some((item) => item.isHost)) {
+    game.players[0].isHost = true;
+    game.players[0].ready = true;
+    game.hostName = game.players[0].name;
+  }
+
+  systemMessage(game, `${player.name} ${reason}.`);
+  emitState();
+  return true;
+}
+
 io.on("connection", (socket) => {
   socket.emit("state", { games: [...games.values()].map(publicGame), sets: setCatalog });
 
@@ -669,6 +710,64 @@ io.on("connection", (socket) => {
     const player = makePlayer(client.playerId, client.playerName, false, socket.id); game.players.push(player); leaveRoom(socket, client); client.gameId = game.id; client.watching = false; socket.join(game.id);
     systemMessage(game, `${player.name} is de lobby binnengekomen.`); socket.emit("game-joined", { gameId: game.id }); sendPrivateState(game, player); emitState();
   });
+  socket.on("leave-game", ({ gameId } = {}) => {
+    const client = getClient(socket);
+    if (!client) return notify(socket, "Je bent nog niet aangemeld.");
+    const game = games.get(String(gameId || client.gameId || ""));
+    if (!game) {
+      leaveRoom(socket, client);
+      socket.emit("game-left", { gameId: gameId || null });
+      emitState();
+      return;
+    }
+    if (game.status !== "lobby") {
+      return notify(socket, "Je kunt de lobby alleen verlaten voordat de draft start. Tijdens een match kun je opgeven.");
+    }
+    const player = game.players.find((item) => item.id === client.playerId);
+    if (player) {
+      removeLobbyPlayer(game, player, "heeft de lobby verlaten");
+    } else {
+      socket.leave(game.id);
+      leaveRoom(socket, client);
+    }
+    client.gameId = null;
+    client.watching = false;
+    socket.emit("game-left", { gameId: game.id });
+    emitState();
+  });
+
+  socket.on("vote-kick", ({ gameId, targetPlayerId } = {}) => {
+    const game = games.get(String(gameId || ""));
+    if (!game || game.status !== "lobby") return notify(socket, "Stemmen om iemand te verwijderen kan alleen in de lobby.");
+    const voter = getPlayer(socket, game);
+    if (!voter) return notify(socket, "Join eerst de lobby om te stemmen.");
+    if (game.players.length < 3) return notify(socket, "Er moeten minimaal drie spelers in de lobby zijn om iemand weg te stemmen.");
+    const target = game.players.find((item) => item.id === String(targetPlayerId || ""));
+    if (!target) return notify(socket, "Deze speler zit niet meer in de lobby.");
+    if (target.id === voter.id) return notify(socket, "Je kunt niet op jezelf stemmen.");
+    if (!target.connected) return notify(socket, "Deze speler is niet verbonden; wacht tot die opnieuw verbindt of verlaat de lobby.");
+
+    if (!game.kickVotes) game.kickVotes = {};
+    if (!Array.isArray(game.kickVotes[target.id])) game.kickVotes[target.id] = [];
+    const votes = game.kickVotes[target.id];
+    if (votes.includes(voter.id)) {
+      return notify(socket, `Je hebt al op ${target.name} gestemd.`);
+    }
+    votes.push(voter.id);
+
+    const eligibleVoters = game.players.filter((item) => item.id !== target.id && item.connected !== false);
+    const needed = Math.floor(eligibleVoters.length / 2) + 1;
+    const voteCount = votes.filter((voterId) => eligibleVoters.some((item) => item.id === voterId)).length;
+    systemMessage(game, `${voter.name} heeft gestemd om ${target.name} te verwijderen (${voteCount}/${needed}).`);
+
+    if (voteCount >= needed) {
+      removeLobbyPlayer(game, target, "is door een meerderheid uit de lobby gestemd");
+      socket.emit("notice", `${target.name} is uit de lobby verwijderd.`);
+    } else {
+      emitState();
+    }
+  });
+
   socket.on("watch-game", ({ gameId } = {}) => {
     const client = getClient(socket); const game = games.get(String(gameId || "")); if (!client) return notify(socket, "Kies eerst een spelersnaam."); if (!game) return notify(socket, "Game niet gevonden.");
     const existing = game.players.find((p) => p.id === client.playerId); leaveRoom(socket, client); client.gameId = game.id; client.watching = !existing; socket.join(game.id);
@@ -741,6 +840,22 @@ io.on("connection", (socket) => {
   });
 
   // --------------------- Match gameplay ---------------------
+  socket.on("toggle-permanent-tap", ({ gameId, permanentId } = {}) => {
+    const game = games.get(String(gameId || ""));
+    if (!game || game.status !== "playing") return;
+    const p = getPlayer(socket, game);
+    if (!p || p.eliminated) return notify(socket, "Je kunt deze kaart nu niet aanpassen.");
+    const permanent = p.battlefield.find((item) => item.permanentId === String(permanentId || ""));
+    if (!permanent) return notify(socket, "Deze kaart staat niet op jouw slagveld.");
+    permanent.tapped = !permanent.tapped;
+    if (!permanent.tapped) {
+      permanent.attacking = false;
+      permanent.blocking = false;
+    }
+    systemMessage(game, `${p.name} ${permanent.tapped ? "tapt" : "untapt"} ${permanent.name}.`);
+    emitState();
+  });
+
   socket.on("tap-land", ({ gameId, permanentId, color } = {}) => {
     const game = games.get(String(gameId || "")); if (!game || game.status !== "playing") return; const p = getPlayer(socket, game); if (!p || p.eliminated) return notify(socket, "Je kunt nu geen mana maken.");
     const perm = p.battlefield.find((x) => x.permanentId === permanentId); if (!perm || !isLand(perm)) return notify(socket, "Dit is geen land."); if (perm.tapped) return notify(socket, "Dit land is al getapt.");
