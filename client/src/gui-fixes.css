@@ -1,40 +1,440 @@
-.card-grid strong,
-.card-grid small,
-.card-grid p,
-.card-grid span {
+
+/* =========================================================
+   Draft Arena — Playtester GUI
+   Aanvullende stijlen; bestaande style.css blijft behouden.
+   ========================================================= */
+
+:root {
+  --pt-bg: #10141d;
+  --pt-panel: #171d27;
+  --pt-panel-raised: #1d2531;
+  --pt-border: #303b4b;
+  --pt-text: #edf1fa;
+  --pt-muted: #a3aec0;
+  --pt-accent: #a99aff;
+  --pt-green: #71dfb1;
+  --pt-danger: #f08b95;
+}
+
+html {
+  background: var(--pt-bg);
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 320px;
+  background: var(--pt-bg);
+  color: var(--pt-text);
+}
+
+button,
+input,
+textarea,
+select {
+  font: inherit;
+}
+
+button {
+  touch-action: manipulation;
+}
+
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--pt-accent);
+  outline-offset: 2px;
+}
+
+/* Algemene spelindeling */
+
+.game-layout {
+  width: 100%;
+  max-width: 1800px;
+  margin: 0 auto;
+  padding: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 310px;
+  align-items: start;
+  gap: 12px;
+}
+
+.game-main {
+  min-width: 0;
+}
+
+.game-title-row {
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.game-title-row h2 {
+  font-size: clamp(20px, 2vw, 27px);
+  letter-spacing: -0.4px;
+}
+
+.panel,
+.roster-panel,
+.draft-panel {
+  border-radius: 10px;
+  box-shadow: none;
+}
+
+.roster-panel,
+.draft-panel {
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.panel-heading {
+  margin-bottom: 12px;
+}
+
+/* Battlefield: compacte kaarten, met duidelijke namen */
+
+.battlefield,
+.battlefield-grid,
+.playtester-battlefield,
+.playtester-card-row {
+  display: flex;
+  align-items: flex-start;
+  align-content: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.battlefield,
+.playtester-battlefield {
+  min-height: 105px;
+  padding: 10px;
+  background: #111721;
+  border: 1px solid var(--pt-border);
+  border-radius: 8px;
+}
+
+.battlefield-card,
+.playtester-card {
+  width: 104px;
+  max-width: 104px;
+  min-width: 0;
+  flex: 0 0 104px;
+  position: relative;
+}
+
+.battlefield-card button,
+.playtester-card button {
+  width: 100%;
+  min-width: 0;
+}
+
+.battlefield-card img,
+.playtester-card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 5 / 7;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.battlefield-card-name,
+.playtester-card-name,
+.card-name-visible {
+  display: -webkit-box;
+  width: 100%;
+  min-height: 32px;
+  margin-top: 4px;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  color: var(--pt-text);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.25;
+  text-align: center;
+}
+
+/* Kaartknoppen en afbeeldingen */
+
+.card-image {
+  width: 100%;
+  border-radius: 7px;
+  transition: transform 120ms ease, filter 120ms ease;
+}
+
+.card-image:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.06);
+}
+
+.image-wrap {
+  border-radius: 7px;
+  border-color: #3a4658;
+}
+
+.image-wrap img {
+  object-fit: cover;
+}
+
+.draft-cards {
+  grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+  gap: 9px;
+}
+
+.draft-card {
+  min-width: 0;
+}
+
+.picks-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(76px, 1fr));
+  gap: 7px;
+  overflow: visible;
+}
+
+.card-image.small {
+  width: 100%;
+  min-width: 0;
+  flex-shrink: 1;
+}
+
+/* Tappen: bruikbaar voor kaartklassen die dit attribuut krijgen */
+
+[data-tapped="true"],
+.tapped,
+.card-tapped {
+  transform: rotate(90deg);
+  transform-origin: center;
+  filter: brightness(0.7);
+}
+
+[data-tapped="true"] img,
+.tapped img,
+.card-tapped img {
+  border-color: #8a78e9;
+}
+
+.tapped-indicator {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 3px 6px;
+  border: 1px solid #6254a3;
+  border-radius: 5px;
+  background: #292443;
+  color: #d5ccff;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+/* Basic lands en bediening */
+
+.land-grid,
+.basic-land-grid,
+.playtester-land-controls {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 8px;
+}
+
+.land-grid button,
+.basic-land-grid button,
+.playtester-land-controls button {
+  min-height: 36px;
+  border: 1px solid var(--pt-border);
+  border-radius: 7px;
+  padding: 8px 10px;
+  background: var(--pt-panel-raised);
+  color: var(--pt-text);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.land-grid button:hover,
+.basic-land-grid button:hover,
+.playtester-land-controls button:hover {
+  border-color: var(--pt-accent);
+}
+
+button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+/* Chat aan de zijkant */
+
+.chat-panel {
+  position: sticky;
+  top: 84px;
+  min-width: 0;
+  min-height: 420px;
+  max-height: calc(100vh - 100px);
+  border: 1px solid var(--pt-border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--pt-panel);
+}
+
+.chat-heading {
+  padding: 12px;
+}
+
+.messages {
+  min-height: 100px;
+  padding: 10px;
+  gap: 8px;
+}
+
+.message {
+  padding: 9px 10px;
+  border-radius: 8px;
+}
+
+.message-top strong {
+  font-size: 11px;
+}
+
+.message p {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.chat-compose {
+  gap: 6px;
+  padding: 9px;
+}
+
+.chat-compose input {
+  min-width: 0;
+  font-size: 12px;
+}
+
+.send-button {
+  min-width: 40px;
+}
+
+/* Spelers en verlaten / vote kick-acties */
+
+.roster {
+  gap: 7px;
+}
+
+.roster-player {
+  min-width: 120px;
+  padding: 8px;
+}
+
+.game-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.game-actions button,
+.leave-game-button,
+.vote-kick-button {
+  min-height: 36px;
+}
+
+.leave-game-button {
+  border: 1px solid #824650;
+  border-radius: 7px;
+  padding: 8px 12px;
+  background: #351f28;
+  color: #ffc1c7;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.vote-kick-button {
+  border: 1px solid var(--pt-border);
+  border-radius: 7px;
+  padding: 8px 12px;
+  background: var(--pt-panel-raised);
+  color: var(--pt-text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+/* Kaart bekijken in een grotere weergave */
+
+.modal-backdrop {
+  z-index: 100;
+}
+
+.card-modal {
+  width: min(650px, 96vw);
+  max-height: 90dvh;
+  gap: 16px;
+  padding: 16px;
+  border-radius: 12px;
+}
+
+.card-modal > img {
+  width: min(42%, 230px);
+  max-height: 72dvh;
+  object-fit: contain;
+}
+
+.modal-info {
+  min-width: 0;
+}
+
+.modal-info h2 {
+  font-size: clamp(18px, 2vw, 23px);
+  line-height: 1.2;
   overflow-wrap: anywhere;
 }
 
-/* Tablet */
-@media (max-width: 1050px) {
+.modal-info p {
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* Toastmeldingen */
+
+.toast {
+  z-index: 120;
+  width: max-content;
+  max-width: calc(100vw - 24px);
+  line-height: 1.45;
+}
+
+/* Middelgrote schermen */
+
+@media (max-width: 1100px) {
   .game-layout {
-    grid-template-columns: minmax(0, 1fr) 280px;
-    gap: 12px;
-  }
-
-  .card-grid,
-  .picks-strip {
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 9px;
-  }
-
-  .game-stats {
-    gap: 8px;
-  }
-
-  .stat-card {
+    grid-template-columns: minmax(0, 1fr) 270px;
+    gap: 10px;
     padding: 10px;
+  }
+
+  .battlefield-card,
+  .playtester-card {
+    width: 88px;
+    max-width: 88px;
+    flex-basis: 88px;
+  }
+
+  .battlefield-card-name,
+  .playtester-card-name,
+  .card-name-visible {
+    font-size: 11px;
   }
 }
 
 /* Mobiel */
+
 @media (max-width: 760px) {
   .game-layout {
     display: flex;
     flex-direction: column;
     align-items: stretch;
-    gap: 14px;
-    padding: 18px 12px 24px;
+    gap: 10px;
+    padding: 9px;
   }
 
   .game-main,
@@ -43,83 +443,116 @@
     max-width: 100%;
   }
 
+  .game-main {
+    order: 1;
+  }
+
   .chat-panel {
     position: relative;
     top: auto;
-    max-height: 440px;
-    min-height: 320px;
+    order: 2;
+    min-height: 300px;
+    max-height: 55dvh;
   }
 
-  .play-section {
-    padding: 14px;
+  .roster-panel,
+  .draft-panel {
+    padding: 10px;
   }
 
-  .card-grid,
-  .picks-strip {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 8px;
-  }
-
-  .game-stats {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-    gap: 6px;
-  }
-
-  .stat-card {
+  .battlefield,
+  .playtester-battlefield {
+    gap: 7px;
     padding: 8px;
   }
 
-  .stat-card span {
-    font-size: 9px;
+  .battlefield-card,
+  .playtester-card {
+    width: 76px;
+    max-width: 76px;
+    flex-basis: 76px;
   }
 
-  .stat-card strong {
+  .battlefield-card-name,
+  .playtester-card-name,
+  .card-name-visible {
+    min-height: 30px;
+    font-size: 10px;
+  }
+
+  .draft-cards {
+    grid-template-columns: repeat(auto-fill, minmax(82px, 1fr));
+    gap: 7px;
+  }
+
+  .picks-strip {
+    grid-template-columns: repeat(auto-fill, minmax(64px, 1fr));
+    gap: 6px;
+  }
+
+  .card-modal {
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .card-modal > img {
+    width: 44%;
+  }
+
+  .modal-info h2 {
     font-size: 17px;
   }
 
-  .section-bar {
-    gap: 8px;
+  .modal-info p {
+    font-size: 11px;
   }
 
-  .land-grid {
-    grid-template-columns: 1fr;
+  .game-title-row h2 {
+    font-size: 21px;
   }
 
-  .board-actions {
-    align-items: stretch;
-  }
-
-  .board-actions > button {
-    flex: 1 1 100%;
-    width: 100%;
+  .land-grid,
+  .basic-land-grid,
+  .playtester-land-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-/* Smalle telefoons */
 @media (max-width: 390px) {
-  .card-grid,
-  .picks-strip {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 8px;
+  .battlefield-card,
+  .playtester-card {
+    width: 68px;
+    max-width: 68px;
+    flex-basis: 68px;
   }
 
-  .game-stats {
+  .battlefield-card-name,
+  .playtester-card-name,
+  .card-name-visible {
+    font-size: 9px;
+  }
+
+  .card-modal {
+    align-items: flex-start;
+  }
+
+  .card-modal > img {
+    width: 42%;
+  }
+
+  .land-grid,
+  .basic-land-grid,
+  .playtester-land-controls {
     grid-template-columns: 1fr;
-  }
-
-  .section-bar h3 {
-    font-size: 14px;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  html {
-    scroll-behavior: auto;
-  }
-
   *,
   *::before,
   *::after {
+    scroll-behavior: auto !important;
     transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
   }
 }
